@@ -1,473 +1,487 @@
-/* =========================================================
-   WLHeatmap app.js (patched)
-   - No Tilequery calls (fixes 422 + disappearing points)
-   - Vector tiles source + style layers (heatmap + points)
-   - Filters: BranchName, ProductGroupLevel1, Date range
-   - Metric toggle: Sales vs Tickets
-   - Clear button resets UI + map
-   ========================================================= */
+/* app.js - WLHeatmap (patched)
+   Fixes:
+   - Date filtering uses SaleDateKey (numeric) to avoid string/date issues
+   - ProductGroup dropdown loads from filters.json OR groups.json OR fallback sampling
+   - Apply/Clear + Sales/Tickets toggles wired reliably
+   - Mapbox expressions use coalesce(to-number(..),0) to avoid "Input is not a number"
+*/
 
-/* ========= CONFIG ========= */
-const WL = {
-  // IMPORTANT: Set these to YOUR Mapbox tileset + source-layer
-  // tileset examples:
-  //   "ckunkel.bp872kqi"  (classic)
-  //   "ckunkel.yourTilesetId"
-  tilesetId: "ckunkel.bp872kqi",
+(() => {
+  const LOG_PREFIX = "[WLHeatmap]";
+  const log = (...args) => console.log("app.js:", ...args);
+  const warn = (...args) => console.warn("app.js:", ...args);
 
-  // sourceLayer MUST match the layer name inside the tileset (Mapbox Studio -> Tilesets -> Inspect)
-  // You had "MapBox-42vjbp" in your console; keep that if that is correct.
-  sourceLayer: "MapBox-42vjbp",
+  log(`${LOG_PREFIX} Booting...`);
 
-  // UI element IDs (must match index.html)
-  ui: {
-    branchSelect: "branchSelect",
-    groupSelect: "groupSelect",
-    metricSelect: "metricSelect", // optional (Sales/Tickets). If missing, fallback to buttons.
-    metricSalesBtn: "metricSalesBtn", // optional
-    metricTicketsBtn: "metricTicketsBtn", // optional
-    startDate: "startDate",
-    endDate: "endDate",
-    clearBtn: "clearFiltersBtn",
-    status: "statusText",
-  },
+  // ========= CONFIG YOU MUST SET =========
+  // Example from your console: ckunkel.bp872kqi
+  const TILESET_ID = "ckunkel.bp872kqi";
 
-  // Map defaults
-  map: {
-    containerId: "map",
-    style: "mapbox://styles/mapbox/light-v11",
-    center: [-96.5, 30.4], // Texas-ish
-    zoom: 6,
-  },
+  // Example from your console: layers=MapBox-42vjbp
+  const SOURCE_LAYER = "MapBox-42vjbp";
 
-  // Data fields in your tiles
-  fields: {
-    branch: "BranchName",
-    group: "ProductGroupLevel1",
-    // safest for filtering:
-    dateKey: "SaleDateKey", // numeric yyyymmdd
-    // metrics:
-    totalSales: "TotalSales",
-    ticketCount: "TicketCount",
-  },
-};
+  // Your tileset fields (based on your CSV export)
+  const FIELD_BRANCH = "BranchName";
+  const FIELD_GROUP = "ProductGroupLevel1";
+  const FIELD_SALEDATEKEY = "SaleDateKey"; // numeric like 20260102
+  const FIELD_SALES = "TotalSales";
+  const FIELD_TICKETS = "TicketCount";
 
-/* ========= HELPERS ========= */
-function $(id) {
-  return document.getElementById(id);
-}
+  // Where filter lists live (GitHub Pages)
+  // Option A: one file containing { branches:[], groups:[] }
+  const FILTERS_URL = "filters.json";
+  // Option B: separate lists (if you prefer)
+  const BRANCHES_URL = "branches.json";
+  const GROUPS_URL = "groups.json";
 
-function setStatus(msg) {
-  const el = $(WL.ui.status);
-  if (el) el.textContent = msg;
-  console.log("[WLHeatmap]", msg);
-}
-
-// Expecting input type="date" => "YYYY-MM-DD"
-function dateToKey(iso) {
-  if (!iso) return null;
-  const parts = iso.split("-");
-  if (parts.length !== 3) return null;
-  const y = Number(parts[0]);
-  const m = Number(parts[1]);
-  const d = Number(parts[2]);
-  if (!y || !m || !d) return null;
-  return y * 10000 + m * 100 + d;
-}
-
-function normalizeText(v) {
-  return (v ?? "").toString().trim();
-}
-
-function safeSetSelectValue(selectEl, value) {
-  if (!selectEl) return;
-  const v = value ?? "";
-  // If value doesn't exist as an option, set to "" (All)
-  const has = Array.from(selectEl.options).some((o) => o.value === v);
-  selectEl.value = has ? v : "";
-}
-
-/* ========= MAP INIT ========= */
-let map;
-let currentMetric = "sales"; // "sales" | "tickets"
-
-function getMetricField() {
-  return currentMetric === "tickets" ? WL.fields.ticketCount : WL.fields.totalSales;
-}
-
-function getMetricLabel() {
-  return currentMetric === "tickets" ? "Tickets" : "Sales";
-}
-
-function buildFilterFromUI() {
-  const branchEl = $(WL.ui.branchSelect);
-  const groupEl = $(WL.ui.groupSelect);
-  const startEl = $(WL.ui.startDate);
-  const endEl = $(WL.ui.endDate);
-
-  const branch = normalizeText(branchEl?.value);
-  const group = normalizeText(groupEl?.value);
-
-  const startKey = dateToKey(startEl?.value);
-  const endKey = dateToKey(endEl?.value);
-
-  const clauses = [];
-
-  // Branch filter
-  if (branch) clauses.push(["==", ["get", WL.fields.branch], branch]);
-
-  // Product group filter
-  if (group) clauses.push(["==", ["get", WL.fields.group], group]);
-
-  // Date range filter using numeric SaleDateKey (robust)
-  // Include if user entered date(s)
-  const dateKeyExpr = ["to-number", ["get", WL.fields.dateKey], 0];
-
-  if (startKey !== null) clauses.push([">=", dateKeyExpr, startKey]);
-  if (endKey !== null) clauses.push(["<=", dateKeyExpr, endKey]);
-
-  // If no clauses => allow all
-  return clauses.length ? ["all", ...clauses] : true;
-}
-
-function applyFiltersToLayers() {
-  if (!map) return;
-  const filter = buildFilterFromUI();
-
-  // Apply to both layers
-  if (map.getLayer("wl-heat")) map.setFilter("wl-heat", filter);
-  if (map.getLayer("wl-points")) map.setFilter("wl-points", filter);
-
-  setStatus(`Applied filters • Metric: ${getMetricLabel()}`);
-}
-
-function applyMetricStyling() {
-  if (!map) return;
-
-  const field = getMetricField();
-
-  // Weight expression (log scale so it doesn't blob everything together)
-  const weight = [
-    "interpolate",
-    ["linear"],
-    ["ln", ["+", 1, ["to-number", ["get", field], 0]]],
-    0,
-    0,
-    8,
-    1,
+  // Tilequery sampling (fallback only if groups missing)
+  // (Keep small to avoid rate limits; you can add more later)
+  const SAMPLE_POINTS = [
+    { name: "Brenham-ish", lon: -96.3698, lat: 30.6744 },
+    { name: "Bryan-ish", lon: -96.3698, lat: 30.6744 }, // swap if you have exact
+    { name: "Austin", lon: -97.7431, lat: 30.2672 },
+    { name: "Houston", lon: -95.3698, lat: 29.7604 },
+    { name: "Dallas", lon: -96.7969, lat: 32.7763 },
   ];
 
-  // Heatmap layers
-  if (map.getLayer("wl-heat")) {
-    map.setPaintProperty("wl-heat", "heatmap-weight", weight);
+  // ========= DOM =========
+  const elBranch = document.getElementById("branchSelect");
+  const elGroup = document.getElementById("groupSelect");
+  const elStart = document.getElementById("startDate");
+  const elEnd = document.getElementById("endDate");
+  const elApply = document.getElementById("applyBtn");
+  const elClear = document.getElementById("clearBtn");
+  const elMetricSales = document.getElementById("metricSales");
+  const elMetricTickets = document.getElementById("metricTickets");
+  const elStatus = document.getElementById("status");
 
-    // Slightly tighter heatmap so it doesn’t “smear everything together”
-    map.setPaintProperty("wl-heat", "heatmap-radius", [
-      "interpolate",
-      ["linear"],
-      ["zoom"],
-      5,
-      12,
-      9,
-      20,
-      12,
-      26,
-    ]);
+  const setStatus = (txt) => {
+    if (elStatus) elStatus.textContent = txt || "";
+  };
 
-    map.setPaintProperty("wl-heat", "heatmap-intensity", [
-      "interpolate",
-      ["linear"],
-      ["zoom"],
-      5,
-      0.6,
-      10,
-      1.0,
-      13,
-      1.3,
-    ]);
+  // ========= STATE =========
+  const state = {
+    metric: "sales", // "sales" | "tickets"
+    branch: "__ALL__",
+    group: "__ALL__",
+    startKey: null, // numeric SaleDateKey
+    endKey: null,   // numeric SaleDateKey
+    branches: [],
+    groups: [],
+    mapLoaded: false,
+  };
+
+  // ========= HELPERS =========
+  function pad2(n) { return String(n).padStart(2, "0"); }
+
+  // Converts "YYYY-MM-DD" -> 20260102
+  function dateToKey(dateStr) {
+    if (!dateStr) return null;
+    // Expecting HTML date input format
+    const [y, m, d] = dateStr.split("-").map((x) => parseInt(x, 10));
+    if (!y || !m || !d) return null;
+    return (y * 10000) + (m * 100) + d;
   }
 
-  // Points layer size based on metric (also log scale)
-  if (map.getLayer("wl-points")) {
-    map.setPaintProperty("wl-points", "circle-radius", [
-      "interpolate",
-      ["linear"],
-      ["ln", ["+", 1, ["to-number", ["get", field], 0]]],
-      0,
-      2,
-      6,
-      8,
-      9,
-      14,
-    ]);
+  function clampKeyRange() {
+    state.startKey = dateToKey(elStart?.value);
+    state.endKey = dateToKey(elEnd?.value);
 
-    map.setPaintProperty("wl-points", "circle-opacity", 0.8);
+    // If user sets only start, keep end open-ended. If only end, keep start open-ended.
+    // If both and swapped, swap.
+    if (state.startKey && state.endKey && state.startKey > state.endKey) {
+      const t = state.startKey;
+      state.startKey = state.endKey;
+      state.endKey = t;
+    }
   }
 
-  setStatus(`Metric set to ${getMetricLabel()}`);
-}
-
-/* ========= FILTER LISTS ========= */
-async function loadFiltersJson() {
-  setStatus("Loading filter lists...");
-
-  try {
-    // MUST exist at WLHeatmap/filters.json (you were getting 404)
-    const res = await fetch("filters.json", { cache: "no-store" });
-    if (!res.ok) throw new Error(`filters.json HTTP ${res.status}`);
-    const json = await res.json();
-
-    // Accept either:
-    // { branches:[{value:"Brenham"}], productGroups:[{value:"Automotive"}] }
-    // or { branches:["Brenham"], productGroups:["Automotive"] }
-    const branchesRaw = json.branches ?? [];
-    const groupsRaw = json.productGroups ?? [];
-
-    const branches =
-      branchesRaw.length && typeof branchesRaw[0] === "string"
-        ? branchesRaw
-        : branchesRaw.map((x) => x.value);
-
-    const groups =
-      groupsRaw.length && typeof groupsRaw[0] === "string"
-        ? groupsRaw
-        : groupsRaw.map((x) => x.value);
-
-    populateSelect($(WL.ui.branchSelect), branches, "All branches");
-    populateSelect($(WL.ui.groupSelect), groups, "All product groups");
-
-    setStatus(`Loaded filters.json • ${branches.length} branches • ${groups.length} groups`);
-  } catch (err) {
-    console.warn("[WLHeatmap] filters.json load failed:", err);
-    populateSelect($(WL.ui.branchSelect), [], "All branches");
-    populateSelect($(WL.ui.groupSelect), [], "All product groups");
-    setStatus("filters.json missing (404). Dropdowns limited to 'All'.");
-  }
-}
-
-function populateSelect(selectEl, values, allLabel) {
-  if (!selectEl) return;
-
-  const prev = selectEl.value;
-
-  selectEl.innerHTML = "";
-
-  // All option
-  const optAll = document.createElement("option");
-  optAll.value = "";
-  optAll.textContent = allLabel;
-  selectEl.appendChild(optAll);
-
-  // Values
-  const dedup = Array.from(new Set(values.filter(Boolean).map((v) => v.toString().trim()))).sort((a, b) =>
-    a.localeCompare(b)
-  );
-
-  for (const v of dedup) {
-    const opt = document.createElement("option");
-    opt.value = v;
-    opt.textContent = v;
-    selectEl.appendChild(opt);
+  function uniqueSorted(arr) {
+    return Array.from(new Set(arr.filter(Boolean))).sort((a, b) => a.localeCompare(b));
   }
 
-  // Restore previous selection if still valid
-  safeSetSelectValue(selectEl, prev);
-}
+  function fillSelect(selectEl, items, allLabel) {
+    if (!selectEl) return;
+    const current = selectEl.value || "__ALL__";
+    selectEl.innerHTML = "";
+    const optAll = document.createElement("option");
+    optAll.value = "__ALL__";
+    optAll.textContent = allLabel;
+    selectEl.appendChild(optAll);
 
-/* ========= UI WIRING ========= */
-function wireUI() {
-  // Dropdown change handlers
-  const branchEl = $(WL.ui.branchSelect);
-  const groupEl = $(WL.ui.groupSelect);
-  const startEl = $(WL.ui.startDate);
-  const endEl = $(WL.ui.endDate);
-  const clearBtn = $(WL.ui.clearBtn);
-
-  if (branchEl) branchEl.addEventListener("change", applyFiltersToLayers);
-  if (groupEl) groupEl.addEventListener("change", applyFiltersToLayers);
-
-  // Date fields: apply on change
-  if (startEl)
-    startEl.addEventListener("change", () => {
-      // If start > end, clear end (prevents “blank map” confusion)
-      const s = dateToKey(startEl.value);
-      const e = dateToKey(endEl?.value);
-      if (s !== null && e !== null && s > e && endEl) endEl.value = "";
-      applyFiltersToLayers();
+    items.forEach((v) => {
+      const o = document.createElement("option");
+      o.value = v;
+      o.textContent = v;
+      selectEl.appendChild(o);
     });
 
-  if (endEl)
-    endEl.addEventListener("change", () => {
-      const s = dateToKey(startEl?.value);
-      const e = dateToKey(endEl.value);
-      if (s !== null && e !== null && s > e && startEl) startEl.value = "";
-      applyFiltersToLayers();
-    });
-
-  // Metric dropdown (optional)
-  const metricEl = $(WL.ui.metricSelect);
-  if (metricEl) {
-    metricEl.addEventListener("change", () => {
-      const v = normalizeText(metricEl.value).toLowerCase();
-      currentMetric = v.includes("ticket") ? "tickets" : "sales";
-      applyMetricStyling();
-      applyFiltersToLayers();
-      syncMetricButtons();
-    });
+    // restore selection if possible
+    if ([...selectEl.options].some(o => o.value === current)) {
+      selectEl.value = current;
+    } else {
+      selectEl.value = "__ALL__";
+    }
   }
 
-  // Metric buttons (optional)
-  const salesBtn = $(WL.ui.metricSalesBtn);
-  const ticketsBtn = $(WL.ui.metricTicketsBtn);
-
-  if (salesBtn) {
-    salesBtn.addEventListener("click", () => {
-      currentMetric = "sales";
-      if (metricEl) metricEl.value = "sales";
-      applyMetricStyling();
-      applyFiltersToLayers();
-      syncMetricButtons();
-    });
+  // Safe numeric expression: coalesce(to-number(get(field)), 0)
+  function numFieldExpr(fieldName) {
+    return ["coalesce", ["to-number", ["get", fieldName]], 0];
   }
 
-  if (ticketsBtn) {
-    ticketsBtn.addEventListener("click", () => {
-      currentMetric = "tickets";
-      if (metricEl) metricEl.value = "tickets";
-      applyMetricStyling();
-      applyFiltersToLayers();
-      syncMetricButtons();
-    });
+  function metricExpr() {
+    return state.metric === "tickets" ? numFieldExpr(FIELD_TICKETS) : numFieldExpr(FIELD_SALES);
   }
 
-  // Clear button
-  if (clearBtn) {
-    clearBtn.addEventListener("click", () => {
-      if (branchEl) branchEl.value = "";
-      if (groupEl) groupEl.value = "";
-      if (startEl) startEl.value = "";
-      if (endEl) endEl.value = "";
+  // ========= MAP INIT =========
+  const map = new mapboxgl.Map({
+    container: "map",
+    style: "mapbox://styles/mapbox/light-v11",
+    center: [-96.5, 30.4],
+    zoom: 6.3,
+  });
 
-      // Reset metric to Sales by default
-      currentMetric = "sales";
-      if (metricEl) metricEl.value = "sales";
+  const SOURCE_ID = "wl-zip-sales";
+  const HEAT_LAYER_ID = "wl-heat";
+  const POINT_LAYER_ID = "wl-points";
 
-      applyMetricStyling();
-      applyFiltersToLayers();
-      syncMetricButtons();
+  map.on("load", () => {
+    state.mapLoaded = true;
+    log(`${LOG_PREFIX} Map loaded. Adding layers...`);
 
-      setStatus("Filters cleared");
-    });
-  }
-
-  syncMetricButtons();
-}
-
-function syncMetricButtons() {
-  const salesBtn = $(WL.ui.metricSalesBtn);
-  const ticketsBtn = $(WL.ui.metricTicketsBtn);
-  if (!salesBtn && !ticketsBtn) return;
-
-  // simple active state
-  if (salesBtn) salesBtn.classList.toggle("active", currentMetric === "sales");
-  if (ticketsBtn) ticketsBtn.classList.toggle("active", currentMetric === "tickets");
-}
-
-/* ========= MAP LAYERS ========= */
-function addDataLayers() {
-  // Vector tiles source
-  if (!map.getSource("wl-sales")) {
-    map.addSource("wl-sales", {
-      type: "vector",
-      url: `mapbox://${WL.tilesetId}`,
-    });
-  }
-
-  // Heatmap layer
-  if (!map.getLayer("wl-heat")) {
-    map.addLayer({
-      id: "wl-heat",
-      type: "heatmap",
-      source: "wl-sales",
-      "source-layer": WL.sourceLayer,
-      maxzoom: 14,
-      paint: {
-        // defaults; metric styling will override weight/radius/intensity
-        "heatmap-weight": 1,
-        "heatmap-radius": 18,
-        "heatmap-intensity": 1,
-        "heatmap-opacity": 0.75,
-      },
-    });
-  }
-
-  // Points layer
-  if (!map.getLayer("wl-points")) {
-    map.addLayer({
-      id: "wl-points",
-      type: "circle",
-      source: "wl-sales",
-      "source-layer": WL.sourceLayer,
-      minzoom: 5,
-      paint: {
-        "circle-radius": 5,
-        "circle-opacity": 0.8,
-        // Do not hardcode colors (per your preference earlier, but circles need something visible).
-        // If you want it to match your old style, tell me your preferred circle color and I'll set it.
-        "circle-color": "#000000",
-        "circle-stroke-width": 1,
-        "circle-stroke-color": "#ffffff",
-      },
-    });
-  }
-
-  applyMetricStyling();
-  applyFiltersToLayers();
-}
-
-/* ========= BOOT ========= */
-async function boot() {
-  try {
-    setStatus("Booting...");
-
-    // sanity checks
-    if (typeof mapboxgl === "undefined") {
-      throw new Error("mapboxgl not found. Ensure Mapbox GL JS is loaded before app.js");
+    // Add vector source
+    if (!map.getSource(SOURCE_ID)) {
+      map.addSource(SOURCE_ID, {
+        type: "vector",
+        url: `mapbox://${TILESET_ID}`,
+      });
     }
 
-    const container = $(WL.map.containerId);
-    if (!container) throw new Error(`Map container #${WL.map.containerId} not found`);
+    // Heatmap layer
+    if (!map.getLayer(HEAT_LAYER_ID)) {
+      map.addLayer({
+        id: HEAT_LAYER_ID,
+        type: "heatmap",
+        source: SOURCE_ID,
+        "source-layer": SOURCE_LAYER,
+        paint: {
+          // weight based on metric (sales or tickets)
+          "heatmap-weight": [
+            "interpolate",
+            ["linear"],
+            ["ln", ["+", 1, metricExpr()]],
+            0, 0,
+            8, 1
+          ],
+          "heatmap-intensity": [
+            "interpolate",
+            ["linear"],
+            ["zoom"],
+            5, 0.8,
+            10, 1.6
+          ],
+          "heatmap-radius": [
+            "interpolate",
+            ["linear"],
+            ["zoom"],
+            5, 10,
+            9, 22,
+            12, 40
+          ],
+          "heatmap-opacity": 0.85
+        }
+      });
+    }
 
-    // Load filter lists (branches/groups)
-    await loadFiltersJson();
+    // Point layer (optional)
+    if (!map.getLayer(POINT_LAYER_ID)) {
+      map.addLayer({
+        id: POINT_LAYER_ID,
+        type: "circle",
+        source: SOURCE_ID,
+        "source-layer": SOURCE_LAYER,
+        paint: {
+          "circle-radius": [
+            "interpolate",
+            ["linear"],
+            ["ln", ["+", 1, metricExpr()]],
+            0, 2,
+            6, 8,
+            9, 14
+          ],
+          "circle-opacity": 0.45
+        }
+      });
+    }
 
-    // Wire UI
-    wireUI();
+    // Apply initial filters
+    applyFiltersToMap();
+    setMetricUI("sales");
+    log(`${LOG_PREFIX} Ready`);
+  });
 
-    // Init map
-    map = new mapboxgl.Map({
-      container: WL.map.containerId,
-      style: WL.map.style,
-      center: WL.map.center,
-      zoom: WL.map.zoom,
-    });
+  // ========= FILTER EXPRESSION =========
+  function buildFilterExpr() {
+    const filters = ["all"];
 
-    map.addControl(new mapboxgl.NavigationControl({ visualizePitch: true }), "top-right");
+    // Branch filter
+    if (state.branch && state.branch !== "__ALL__") {
+      filters.push(["==", ["get", FIELD_BRANCH], state.branch]);
+    }
 
-    map.on("load", () => {
-      setStatus("Map loaded. Adding layers...");
-      addDataLayers();
-      setStatus("Ready");
-    });
+    // Group filter
+    if (state.group && state.group !== "__ALL__") {
+      filters.push(["==", ["get", FIELD_GROUP], state.group]);
+    }
 
-    // Helpful debug: if the source-layer is wrong, you'll see zero features always.
-    map.on("error", (e) => {
-      console.warn("[WLHeatmap] Map error:", e?.error || e);
-    });
-  } catch (err) {
-    console.error("[WLHeatmap] Boot error:", err);
-    setStatus(`Error: ${err.message || err}`);
+    // Date range using numeric SaleDateKey
+    // Note: SaleDateKey might be stored as string in tiles, so convert.
+    const saleKeyExpr = ["coalesce", ["to-number", ["get", FIELD_SALEDATEKEY]], 0];
+
+    if (state.startKey) {
+      filters.push([">=", saleKeyExpr, state.startKey]);
+    }
+    if (state.endKey) {
+      filters.push(["<=", saleKeyExpr, state.endKey]);
+    }
+
+    return filters;
   }
-}
 
-document.addEventListener("DOMContentLoaded", boot);
+  function applyFiltersToMap() {
+    if (!state.mapLoaded) return;
+
+    const filterExpr = buildFilterExpr();
+
+    // apply to both layers
+    if (map.getLayer(HEAT_LAYER_ID)) map.setFilter(HEAT_LAYER_ID, filterExpr);
+    if (map.getLayer(POINT_LAYER_ID)) map.setFilter(POINT_LAYER_ID, filterExpr);
+
+    // update metric-driven paint props
+    updateMetricPaint();
+
+    log(`${LOG_PREFIX} Applied filters • Metric: ${state.metric === "tickets" ? "Tickets" : "Sales"}`);
+  }
+
+  function updateMetricPaint() {
+    if (!state.mapLoaded) return;
+
+    // Update heatmap weight
+    if (map.getLayer(HEAT_LAYER_ID)) {
+      map.setPaintProperty(HEAT_LAYER_ID, "heatmap-weight", [
+        "interpolate",
+        ["linear"],
+        ["ln", ["+", 1, metricExpr()]],
+        0, 0,
+        8, 1
+      ]);
+    }
+
+    // Update point radius
+    if (map.getLayer(POINT_LAYER_ID)) {
+      map.setPaintProperty(POINT_LAYER_ID, "circle-radius", [
+        "interpolate",
+        ["linear"],
+        ["ln", ["+", 1, metricExpr()]],
+        0, 2,
+        6, 8,
+        9, 14
+      ]);
+    }
+  }
+
+  // ========= UI WIRING =========
+  function setMetricUI(metric) {
+    state.metric = metric;
+
+    if (elMetricSales) elMetricSales.classList.toggle("active", metric === "sales");
+    if (elMetricTickets) elMetricTickets.classList.toggle("active", metric === "tickets");
+
+    log(`${LOG_PREFIX} Metric set to ${metric === "tickets" ? "Tickets" : "Sales"}`);
+    applyFiltersToMap();
+  }
+
+  function wireUI() {
+    // Branch/group dropdown changes update state (do not auto-apply unless you want it)
+    elBranch?.addEventListener("change", () => {
+      state.branch = elBranch.value || "__ALL__";
+    });
+
+    elGroup?.addEventListener("change", () => {
+      state.group = elGroup.value || "__ALL__";
+    });
+
+    // Date inputs
+    elStart?.addEventListener("change", () => clampKeyRange());
+    elEnd?.addEventListener("change", () => clampKeyRange());
+
+    // Apply
+    elApply?.addEventListener("click", () => {
+      clampKeyRange();
+      state.branch = elBranch?.value || "__ALL__";
+      state.group = elGroup?.value || "__ALL__";
+      applyFiltersToMap();
+    });
+
+    // Clear
+    elClear?.addEventListener("click", () => {
+      if (elBranch) elBranch.value = "__ALL__";
+      if (elGroup) elGroup.value = "__ALL__";
+      if (elStart) elStart.value = "";
+      if (elEnd) elEnd.value = "";
+
+      state.branch = "__ALL__";
+      state.group = "__ALL__";
+      state.startKey = null;
+      state.endKey = null;
+
+      applyFiltersToMap();
+      setStatus("");
+      log(`${LOG_PREFIX} Cleared filters`);
+    });
+
+    // Metric toggles
+    elMetricSales?.addEventListener("click", () => setMetricUI("sales"));
+    elMetricTickets?.addEventListener("click", () => setMetricUI("tickets"));
+  }
+
+  // ========= LOAD FILTER LISTS =========
+  async function fetchJson(url) {
+    const res = await fetch(url, { cache: "no-store" });
+    if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
+    return await res.json();
+  }
+
+  async function loadFilters() {
+    log(`${LOG_PREFIX} Loading filter lists...`);
+    setStatus("Loading filters...");
+
+    // 1) Try filters.json
+    try {
+      const data = await fetchJson(FILTERS_URL);
+      const branches = Array.isArray(data.branches) ? data.branches : [];
+      const groups = Array.isArray(data.groups) ? data.groups : [];
+
+      state.branches = uniqueSorted(branches);
+      state.groups = uniqueSorted(groups);
+
+      fillSelect(elBranch, state.branches, "All branches");
+      fillSelect(elGroup, state.groups, "All product groups");
+
+      log(`${LOG_PREFIX} Loaded filters.json • ${state.branches.length} branches • ${state.groups.length} groups`);
+      setStatus(`Filters loaded (${state.branches.length} branches, ${state.groups.length} groups).`);
+
+      // If groups is empty, try groups.json next
+      if (state.groups.length === 0) {
+        await tryLoadSplitLists();
+      }
+
+      // If still empty, fallback sampling
+      if (state.groups.length === 0) {
+        await fallbackSampleTilequery();
+      }
+
+      return;
+    } catch (e) {
+      warn(`${LOG_PREFIX} filters.json not available (${e.message}). Trying branches.json/groups.json...`);
+    }
+
+    // 2) Try split lists
+    await tryLoadSplitLists();
+
+    // 3) Fallback sampling
+    if (state.groups.length === 0) {
+      await fallbackSampleTilequery();
+    }
+  }
+
+  async function tryLoadSplitLists() {
+    let branches = [];
+    let groups = [];
+
+    try {
+      const b = await fetchJson(BRANCHES_URL);
+      branches = Array.isArray(b) ? b : (Array.isArray(b.branches) ? b.branches : []);
+    } catch (_) {}
+
+    try {
+      const g = await fetchJson(GROUPS_URL);
+      groups = Array.isArray(g) ? g : (Array.isArray(g.groups) ? g.groups : []);
+    } catch (_) {}
+
+    if (branches.length) state.branches = uniqueSorted(branches);
+    if (groups.length) state.groups = uniqueSorted(groups);
+
+    fillSelect(elBranch, state.branches, "All branches");
+    fillSelect(elGroup, state.groups, "All product groups");
+
+    log(`${LOG_PREFIX} Loaded split lists • ${state.branches.length} branches • ${state.groups.length} groups`);
+    setStatus(`Filters loaded (${state.branches.length} branches, ${state.groups.length} groups).`);
+  }
+
+  // Only used if you forgot to generate product group list JSON
+  async function fallbackSampleTilequery() {
+    setStatus("Loading product groups (sampling tiles)...");
+
+    const token = mapboxgl.accessToken;
+    if (!token || token.includes("YOUR_MAPBOX_PUBLIC_TOKEN_HERE")) {
+      warn(`${LOG_PREFIX} No Mapbox token set; cannot tilequery sample.`);
+      setStatus("No token set; cannot auto-discover product groups.");
+      return;
+    }
+
+    const groupsSet = new Set(state.groups);
+    const branchesSet = new Set(state.branches);
+
+    // Mapbox tilequery endpoint expects tileset id WITHOUT username? It uses v4/{tileset}
+    // In your earlier logs it was /v4/ckunkel.bp872kqi/tilequery/...
+    const tilequeryBase = `https://api.mapbox.com/v4/${TILESET_ID}/tilequery`;
+
+    // We'll keep radius modest to avoid 422 + heavy payloads
+    const radius = 8000;
+    const limit = 5000;
+
+    for (const p of SAMPLE_POINTS) {
+      const url =
+        `${tilequeryBase}/${p.lon},${p.lat}.json` +
+        `?radius=${radius}&limit=${limit}` +
+        `&layers=${encodeURIComponent(SOURCE_LAYER)}` +
+        `&access_token=${encodeURIComponent(token)}`;
+
+      try {
+        const res = await fetch(url);
+        if (!res.ok) {
+          warn(`${LOG_PREFIX} tilequery failed ${res.status} @ ${p.name}`);
+          continue;
+        }
+        const json = await res.json();
+        const feats = Array.isArray(json.features) ? json.features : [];
+        feats.forEach((f) => {
+          const props = f.properties || {};
+          if (props[FIELD_GROUP]) groupsSet.add(props[FIELD_GROUP]);
+          if (props[FIELD_BRANCH]) branchesSet.add(props[FIELD_BRANCH]);
+        });
+      } catch (e) {
+        warn(`${LOG_PREFIX} tilequery error @ ${p.name}`, e);
+      }
+    }
+
+    state.groups = uniqueSorted(Array.from(groupsSet));
+    state.branches = uniqueSorted(Array.from(branchesSet));
+
+    fillSelect(elBranch, state.branches, "All branches");
+    fillSelect(elGroup, state.groups, "All product groups");
+
+    log(`${LOG_PREFIX} Loaded filters from sampled tiles (fallback)`);
+    setStatus(`Filters loaded (${state.branches.length} branches, ${state.groups.length} groups).`);
+  }
+
+  // ========= START =========
+  wireUI();
+  loadFilters()
+    .catch((e) => {
+      warn(`${LOG_PREFIX} Failed to load filters`, e);
+      setStatus("Failed to load filters.");
+    });
+
+})();
