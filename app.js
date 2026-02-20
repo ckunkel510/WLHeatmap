@@ -214,9 +214,6 @@ if (canDateFilter) {
     style: "mapbox://styles/mapbox/light-v11",
     center: [-96.7, 30.6],
     zoom: 6.3,
-
-    // Perf: reduce animation work in embedded/low-GPU environments (BisTrack dashboards)
-    fadeDuration: 0,
   });
 
   map.addControl(new mapboxgl.NavigationControl({ visualizePitch: true }), "top-right");
@@ -417,8 +414,6 @@ try {
   const canDateFilterNow = (state.startKey != null || state.endKey != null) ? tilesetHasSaleDateKey() : true;
   const dateNote = (canDateFilterNow ? "" : " (SaleDateKey not visible — using SaleDate string filter)");
 
-    // Refresh hover aggregation cache after filters change
-    try { if (typeof scheduleRebuildAggregates === "function") scheduleRebuildAggregates(); } catch {}
 
     setStatus(
       `Metric: ${METRICS[state.metric].label} • ` +
@@ -484,8 +479,8 @@ function wirePointHoverTooltip() {
   wirePointHoverTooltip._bound = true;
 
   const hoverPopup = new mapboxgl.Popup({
-    closeButton: false,
-    closeOnClick: false,
+    closeButton: true,
+    closeOnClick: true,
     maxWidth: "320px",
   });
 
@@ -503,75 +498,8 @@ function wirePointHoverTooltip() {
 
   const getProp = (p, key) => (p && p[key] != null ? p[key] : undefined);
 
-  // --------- Perf: cache aggregates per (Zip5+Branch) for current viewport & filters ---------
-  const aggCache = new Map();
-  let aggBuiltFor = { sig: "", zoom: null, bounds: "" };
-  let aggBuildTimer = null;
-
-  const stateSig = () => `${state.branch}|${state.group}|${state.startKey ?? ""}|${state.endKey ?? ""}`;
-  const boundsSig = () => {
-    try {
-      const b = map.getBounds();
-      const r = (x) => Math.round(x * 1000) / 1000;
-      return `${r(b.getWest())},${r(b.getSouth())},${r(b.getEast())},${r(b.getNorth())}`;
-    } catch { return ""; }
-  };
-  const parseDateMaybe = (v) => {
-    if (!v) return null;
-    const d = new Date(String(v));
-    return isNaN(d.getTime()) ? null : d;
-  };
-
-  function rebuildAggregatesNow() {
-    aggBuildTimer = null;
-    if (!map.getLayer(POINT_LAYER_ID)) return;
-    const sig = stateSig();
-    const zoom = map.getZoom();
-    const bSig = boundsSig();
-    if (aggBuiltFor.sig === sig && aggBuiltFor.zoom === zoom && aggBuiltFor.bounds === bSig && aggCache.size) return;
-    aggCache.clear();
-    const feats = map.queryRenderedFeatures({ layers: [POINT_LAYER_ID] }) || [];
-    for (const ft of feats) {
-      const p = ft.properties || {};
-      const zip = String(getProp(p, "Zip5") ?? "");
-      const branch = String(getProp(p, "BranchName") ?? "");
-      if (!zip || !branch) continue;
-      const key = `${zip}|||${branch}`;
-      let acc = aggCache.get(key);
-      if (!acc) {
-        acc = { zip, branch, tickets: 0, sales: 0, profit: 0, minDate: null, maxDate: null, byGroup: new Map() };
-        aggCache.set(key, acc);
-      }
-      const t = Number(getProp(p, "TicketCount")) || 0;
-      const s = Number(getProp(p, "TotalSales")) || 0;
-      const pr = Number(getProp(p, "TotalProfit")) || 0;
-      acc.tickets += t; acc.sales += s; acc.profit += pr;
-      if (state.group === "__ALL__") {
-        const g = String(getProp(p, "ProductGroupLevel1") ?? "—");
-        const cur = acc.byGroup.get(g) || { tickets: 0, sales: 0, profit: 0 };
-        cur.tickets += t; cur.sales += s; cur.profit += pr;
-        acc.byGroup.set(g, cur);
-      }
-      const sd = getProp(p, BOM_SALEDATE_FIELD) ?? getProp(p, "SaleDate") ?? getProp(p, "\\ufeffSaleDateISO") ?? getProp(p, "SaleDateISO") ?? null;
-      const dt = parseDateMaybe(sd);
-      if (dt) { if (!acc.minDate || dt < acc.minDate) acc.minDate = dt; if (!acc.maxDate || dt > acc.maxDate) acc.maxDate = dt; }
-    }
-    aggBuiltFor = { sig, zoom, bounds: bSig };
-  }
-
-  function scheduleRebuildAggregates() {
-    if (aggBuildTimer) return;
-    aggBuildTimer = setTimeout(rebuildAggregatesNow, 80);
-  }
-
   const bindHandlers = () => {
     if (!map.getLayer(POINT_LAYER_ID)) return false;
-
-    // Keep aggregates fresh after tiles render and viewport changes
-    scheduleRebuildAggregates();
-    map.on("moveend", scheduleRebuildAggregates);
-    map.on("zoomend", scheduleRebuildAggregates);
-    map.on("idle", scheduleRebuildAggregates);
 
     map.on("mouseenter", POINT_LAYER_ID, () => {
       map.getCanvas().style.cursor = "pointer";
@@ -582,111 +510,120 @@ function wirePointHoverTooltip() {
       hoverPopup.remove();
     });
 
-    map.on("click", POINT_LAYER_ID, (e) => {
-      // Pin popup on click (same content as hover)
-      // Prevent default map click behavior
-      e.preventDefault();
-    });
+    // Click-to-show tooltip (more reliable + lighter than hover in BisTrack embedded dashboards)
+map.on("click", POINT_LAYER_ID, (e) => {
+  const f = e.features && e.features[0];
+  if (!f) return;
 
-    // Keep hover updates light: lookup pre-aggregated values in cache.
-let rafPending = false;
-let lastHoverKey = "";
+  const p0 = f.properties || {};
+  const zip = getProp(p0, "Zip5") ?? "—";
+  const branch = getProp(p0, "BranchName") ?? "—";
 
-map.on("mousemove", POINT_LAYER_ID, (e) => {
-  if (rafPending) return;
-  rafPending = true;
+  // Aggregate across currently rendered + filtered features in the viewport (fast enough on click)
+  const feats = map.queryRenderedFeatures({ layers: [POINT_LAYER_ID] }) || [];
 
-  requestAnimationFrame(() => {
-    rafPending = false;
+  let ticketsSum = 0;
+  let salesSum = 0;
+  let profitSum = 0;
+  const byGroup = new Map();
+  let minDate = null;
+  let maxDate = null;
 
-    const f = e.features && e.features[0];
-    if (!f) return;
+  for (const ft of feats) {
+    const p = ft.properties || {};
+    const z = getProp(p, "Zip5");
+    const b = getProp(p, "BranchName");
+    if (String(z) !== String(zip)) continue;
+    if (String(b) !== String(branch)) continue;
 
-    const p0 = f.properties || {};
-    const zip = String(getProp(p0, "Zip5") ?? "");
-    const branch = String(getProp(p0, "BranchName") ?? "");
-    if (!zip || !branch) return;
+    const t = Number(getProp(p, "TicketCount")) || 0;
+    const s = Number(getProp(p, "TotalSales")) || 0;
+    const pr = Number(getProp(p, "TotalProfit")) || 0;
 
-    const key = `${zip}|||${branch}`;
-    if (key !== lastHoverKey) {
-      lastHoverKey = key;
-      scheduleRebuildAggregates();
+    ticketsSum += t;
+    salesSum += s;
+    profitSum += pr;
+
+    if (state.group === "__ALL__") {
+      const g = String(getProp(p, "ProductGroupLevel1") ?? "—");
+      const cur = byGroup.get(g) || { tickets: 0, sales: 0, profit: 0 };
+      cur.tickets += t;
+      cur.sales += s;
+      cur.profit += pr;
+      byGroup.set(g, cur);
     }
 
-    const acc = aggCache.get(key);
-    if (!acc) return;
+    const sd =
+      getProp(p, BOM_SALEDATE_FIELD) ??
+      getProp(p, "SaleDate") ??
+      getProp(p, "\ufeffSaleDateISO") ??
+      getProp(p, "SaleDateISO") ??
+      null;
 
-    // Coordinates: use hovered feature geometry
-    let coords = null;
-    if (f.geometry && f.geometry.type === "Point" && Array.isArray(f.geometry.coordinates)) {
-      coords = f.geometry.coordinates.slice();
-    } else {
-      const lon = Number(getProp(p0, "Lon"));
-      const lat = Number(getProp(p0, "Lat"));
-      if (isFinite(lon) && isFinite(lat)) coords = [lon, lat];
-    }
-    if (!coords) return;
-
-    while (Math.abs(e.lngLat.lng - coords[0]) > 180) {
-      coords[0] += e.lngLat.lng > coords[0] ? 360 : -360;
-    }
-
-    const dateLine = (() => {
-      if (acc.minDate && acc.maxDate) {
-        const a = formatMDY(acc.minDate);
-        const b = formatMDY(acc.maxDate);
-        return (a === b) ? a : `${a} → ${b}`;
+    if (sd) {
+      const dt = new Date(String(sd));
+      if (!isNaN(dt.getTime())) {
+        if (!minDate || dt < minDate) minDate = dt;
+        if (!maxDate || dt > maxDate) maxDate = dt;
       }
-      const hoveredDate =
-        getProp(p0, BOM_SALEDATE_FIELD) ??
-        getProp(p0, "SaleDate") ??
-        getProp(p0, "\ufeffSaleDateISO") ??
-        getProp(p0, "SaleDateISO") ??
-        "—";
-      return hoveredDate;
-    })();
-
-    // Top groups list
-    let breakdownHtml = "";
-    if (state.group === "__ALL__" && acc.byGroup && acc.byGroup.size) {
-      const rows = Array.from(acc.byGroup.entries())
-        .map(([g, v]) => ({ g, ...v }))
-        .sort((a, b) => b.sales - a.sales)
-        .slice(0, 6);
-
-      breakdownHtml =
-        `<div style="margin-top:10px; font-size:12px;">` +
-        `<div style="font-weight:700; margin-bottom:6px;">Top groups (viewport)</div>` +
-        rows.map(r =>
-          `<div style="display:flex; justify-content:space-between; gap:10px;">` +
-            `<span style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:180px;">${r.g}</span>` +
-            `<span>${fmtMoney(r.sales)}</span>` +
-          `</div>`
-        ).join("") +
-        `</div>`;
     }
+  }
 
-    const html = `
-      <div style="font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;">
-        <div style="font-weight:700; font-size:13px; margin-bottom:6px;">${acc.zip} • ${acc.branch}</div>
-        <div style="font-size:12px; opacity:.9; margin-bottom:8px;">${dateLine}</div>
-        <div style="font-size:12px; margin-bottom:8px;">
-          <b>Scope:</b> ${state.group === "__ALL__" ? "All groups" : state.group} • ${state.branch === "__ALL__" ? "All branches" : state.branch}
-        </div>
-        <div style="display:grid; grid-template-columns: 1fr 1fr; gap:8px; font-size:12px;">
-          <div><b>Tickets</b><br>${fmtNum(acc.tickets)}</div>
-          <div><b>Sales</b><br>${fmtMoney(acc.sales)}</div>
-          <div><b>Profit</b><br>${fmtMoney(acc.profit)}</div>
-        </div>
-        ${breakdownHtml}
-        <div style="margin-top:8px; font-size:11px; opacity:.7;">
-          Note: totals are for currently rendered points in the viewport (and respect your filters).
-        </div>
+  const dateLine = (() => {
+    if (minDate && maxDate) {
+      const a = formatMDY(minDate);
+      const b = formatMDY(maxDate);
+      return (a === b) ? a : `${a} → ${b}`;
+    }
+    const clickedDate =
+      getProp(p0, BOM_SALEDATE_FIELD) ??
+      getProp(p0, "SaleDate") ??
+      getProp(p0, "\ufeffSaleDateISO") ??
+      getProp(p0, "SaleDateISO") ??
+      "—";
+    return clickedDate;
+  })();
+
+  // Breakdown (top 6 groups by sales)
+  let breakdownHtml = "";
+  if (state.group === "__ALL__" && byGroup.size) {
+    const rows = Array.from(byGroup.entries())
+      .map(([g, v]) => ({ g, ...v }))
+      .sort((a, b) => b.sales - a.sales)
+      .slice(0, 6);
+
+    breakdownHtml =
+      `<div style="margin-top:10px; font-size:12px;">` +
+      `<div style="font-weight:700; margin-bottom:6px;">Top groups (viewport)</div>` +
+      rows.map(r =>
+        `<div style="display:flex; justify-content:space-between; gap:10px;">` +
+          `<span style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:180px;">${r.g}</span>` +
+          `<span>${fmtMoney(r.sales)}</span>` +
+        `</div>`
+      ).join("") +
+      `</div>`;
+  }
+
+  const html = `
+    <div style="font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;">
+      <div style="font-weight:700; font-size:13px; margin-bottom:6px;">${zip} • ${branch}</div>
+      <div style="font-size:12px; opacity:.9; margin-bottom:8px;">${dateLine}</div>
+      <div style="font-size:12px; margin-bottom:8px;">
+        <b>Scope:</b> ${state.group === "__ALL__" ? "All groups" : state.group} • ${state.branch === "__ALL__" ? "All branches" : state.branch}
       </div>
-    `;
+      <div style="display:grid; grid-template-columns: 1fr 1fr; gap:8px; font-size:12px;">
+        <div><b>Tickets</b><br>${fmtNum(ticketsSum)}</div>
+        <div><b>Sales</b><br>${fmtMoney(salesSum)}</div>
+        <div><b>Profit</b><br>${fmtMoney(profitSum)}</div>
+      </div>
+      ${breakdownHtml}
+      <div style="margin-top:8px; font-size:11px; opacity:.7;">
+        Note: totals are for currently rendered points in the viewport (and respect your filters).
+      </div>
+    </div>
+  `;
 
-    hoverPopup.setLngLat(coords).setHTML(html).addTo(map);
-  });
+  hoverPopup.setLngLat(e.lngLat).setHTML(html).addTo(map);
 });
 
     return true;
@@ -700,7 +637,7 @@ map.on("mousemove", POINT_LAYER_ID, (e) => {
   }
 }
 
-  map.on("load", () => {
+map.on("load", () => {
       log("Map loaded. Adding layers...");
       ensureLayers();
       wirePointHoverTooltip();
