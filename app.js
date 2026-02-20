@@ -1,242 +1,235 @@
-/* =========================
-   Mapbox Zip Heatmap
-   - Tileset: ckunkel.bp872kqi
-   - Source layer: MapBox-42vjbp (must match exactly)
-   - Toggle: tickets vs sales
-   - Filter: branch
-   ========================= */
+// ====== CONFIG (EDIT THESE) ======
+const MAPBOX_TOKEN = "pk.eyJ1IjoiY2t1bmtlbCIsImEiOiJjbWx1Yjc4ODIwOW51M2Zwdm15dHFodnh1In0.F2yytru7jt9khYyPziZrHw";
+const TILESET_ID   = "ckunkel.bp872kqi";
+const SOURCE_LAYER = "MapBox-42vjbp";
+const FILTERS_JSON_URL = "./filters.json"; // optional, set to null to disable
+// ================================
 
-mapboxgl.accessToken = "pk.eyJ1IjoiY2t1bmtlbCIsImEiOiJjbWx1Yjc4ODIwOW51M2Zwdm15dHFodnh1In0.F2yytru7jt9khYyPziZrHw";
-
-// Your tileset + source layer
-const TILESET_URL = "mapbox://ckunkel.bp872kqi";
-const SOURCE_ID = "zipSales";
-const SOURCE_LAYER = "MapBox-42vjbp"; // <-- confirm in Mapbox Studio dropdown
-
-// Layer IDs
-const HEAT_LAYER_ID = "zip-heat";
-const POINT_LAYER_ID = "zip-points";
-
-// UI state
-let mode = "tickets"; // "tickets" | "sales"
-let selectedBranch = ""; // "" = all
-
-// Use your data properties from the CSV
-const PROP_BRANCH = "BranchID";
-const PROP_ZIP = "PostCode";
-const PROP_DATE = "SaleDate";          // or SaleDateISO if you exported that
-const PROP_TICKETS = "TicketCount";
-const PROP_SALES = "TotalSales";
-const PROP_PROFIT = "TotalProfit";
-const PROP_W_TICKETS = "weight_tickets";
-const PROP_W_SALES = "weight_sales";
-
-// Heat scaling (tune these after you eyeball the map)
-const WEIGHT_MAX_TICKETS = 50;     // raise/lower after checking typical max per ZIP/day
-const WEIGHT_MAX_SALES   = 20000;  // raise/lower after checking typical max per ZIP/day
+mapboxgl.accessToken = MAPBOX_TOKEN;
 
 const map = new mapboxgl.Map({
   container: "map",
   style: "mapbox://styles/mapbox/light-v11",
-  center: [-96.8, 31.0], // Texas-ish start
-  zoom: 5.6
+  center: [-96.7, 30.7],
+  zoom: 6
 });
 
-map.addControl(new mapboxgl.NavigationControl({ showCompass: false }), "top-right");
+const UI = {
+  branchSelect: document.getElementById("branchSelect"),
+  groupSelect: document.getElementById("groupSelect"),
+  metricSales: document.getElementById("metricSales"),
+  metricTickets: document.getElementById("metricTickets"),
+  startDate: document.getElementById("startDate"),
+  endDate: document.getElementById("endDate"),
+  applyDates: document.getElementById("applyDates"),
+  clearDates: document.getElementById("clearDates")
+};
 
-function setActiveButton() {
-  const btnTickets = document.getElementById("btnTickets");
-  const btnSales = document.getElementById("btnSales");
-  btnTickets.classList.toggle("active", mode === "tickets");
-  btnSales.classList.toggle("active", mode === "sales");
+let metric = "sales"; // "sales" | "tickets"
+
+function setActiveMetricButtons() {
+  UI.metricSales.classList.toggle("activeBtn", metric === "sales");
+  UI.metricTickets.classList.toggle("activeBtn", metric === "tickets");
 }
 
-function buildBranchFilter() {
-  // If branch is blank => no filter
-  if (!selectedBranch) return true;
+/**
+ * Date filtering notes:
+ * - We assume feature property "SaleDate" is a string "YYYY-MM-DD".
+ * - String comparison works correctly for ISO dates.
+ */
+function buildFilter() {
+  const branch = UI.branchSelect.value;
+  const group  = UI.groupSelect.value;
+  const start  = UI.startDate.value; // "" or "YYYY-MM-DD"
+  const end    = UI.endDate.value;
 
-  // Vector tile properties can be strings; compare as string
-  return ["==", ["to-string", ["get", PROP_BRANCH]], String(selectedBranch)];
+  const f = ["all"];
+
+  if (branch !== "__all__") f.push(["==", ["get", "BranchName"], branch]);
+  if (group  !== "__all__") f.push(["==", ["get", "ProductGroupLevel1"], group]);
+
+  if (start) f.push([">=", ["get", "SaleDate"], start]);
+  if (end)   f.push(["<=", ["get", "SaleDate"], end]);
+
+  return f;
 }
 
-function applyFilters() {
-  const filter = buildBranchFilter();
-  if (map.getLayer(HEAT_LAYER_ID)) map.setFilter(HEAT_LAYER_ID, filter);
-  if (map.getLayer(POINT_LAYER_ID)) map.setFilter(POINT_LAYER_ID, filter);
+function setHeatmapWeight() {
+  if (metric === "sales") {
+    map.setPaintProperty("zips-heat", "heatmap-weight", [
+      "interpolate", ["linear"], ["coalesce", ["get", "TotalSales"], 0],
+      0, 0,
+      250, 0.15,
+      1000, 0.35,
+      5000, 0.75,
+      15000, 1
+    ]);
+  } else {
+    map.setPaintProperty("zips-heat", "heatmap-weight", [
+      "interpolate", ["linear"], ["coalesce", ["get", "TicketCount"], 0],
+      0, 0,
+      1, 0.15,
+      10, 0.40,
+      40, 0.75,
+      120, 1
+    ]);
+  }
 }
 
-function applyWeightMode() {
-  if (!map.getLayer(HEAT_LAYER_ID)) return;
+function applyFiltersAndMetric() {
+  const filter = buildFilter();
 
-  const prop = mode === "tickets" ? PROP_W_TICKETS : PROP_W_SALES;
-  const max = mode === "tickets" ? WEIGHT_MAX_TICKETS : WEIGHT_MAX_SALES;
+  if (map.getLayer("zips-heat")) map.setFilter("zips-heat", filter);
+  if (map.getLayer("zips-circles")) map.setFilter("zips-circles", filter);
 
-  // Heatmap-weight expects values 0..1-ish; we interpolate your property to that range.
-  map.setPaintProperty(HEAT_LAYER_ID, "heatmap-weight", [
-    "interpolate", ["linear"],
-    ["coalesce", ["to-number", ["get", prop]], 0],
-    0, 0,
-    max, 1
-  ]);
+  setHeatmapWeight();
 }
 
-// Pull distinct BranchIDs for the dropdown by querying rendered features.
-// (Works once tiles load and user is zoomed somewhere with data.)
-function populateBranchDropdownOnce() {
-  const select = document.getElementById("branchSelect");
-  if (!select) return;
+function wireUI() {
+  UI.branchSelect.addEventListener("change", applyFiltersAndMetric);
+  UI.groupSelect.addEventListener("change", applyFiltersAndMetric);
 
-  const seen = new Set();
+  UI.metricSales.addEventListener("click", () => {
+    metric = "sales";
+    setActiveMetricButtons();
+    applyFiltersAndMetric();
+  });
 
-  // Query features in current viewport from the points layer (or heat layer)
-  const features = map.queryRenderedFeatures({ layers: [POINT_LAYER_ID] });
+  UI.metricTickets.addEventListener("click", () => {
+    metric = "tickets";
+    setActiveMetricButtons();
+    applyFiltersAndMetric();
+  });
 
-  for (const f of features) {
-    const v = f?.properties?.[PROP_BRANCH];
-    if (v === null || v === undefined || v === "") continue;
-    seen.add(String(v));
+  // Date controls
+  UI.applyDates.addEventListener("click", applyFiltersAndMetric);
+
+  UI.clearDates.addEventListener("click", () => {
+    UI.startDate.value = "";
+    UI.endDate.value = "";
+    applyFiltersAndMetric();
+  });
+}
+
+function addOption(selectEl, value, label) {
+  const opt = document.createElement("option");
+  opt.value = value;
+  opt.textContent = label;
+  selectEl.appendChild(opt);
+}
+
+async function tryLoadFiltersJson() {
+  if (!FILTERS_JSON_URL) return false;
+
+  try {
+    const res = await fetch(FILTERS_JSON_URL, { cache: "no-store" });
+    if (!res.ok) return false;
+    const json = await res.json();
+
+    const branches = Array.isArray(json.branches) ? json.branches : [];
+    const groups   = Array.isArray(json.productGroupsLevel1) ? json.productGroupsLevel1 : [];
+
+    branches.sort().forEach(b => addOption(UI.branchSelect, b, b));
+    groups.sort().forEach(g => addOption(UI.groupSelect, g, g));
+
+    return branches.length > 0 || groups.length > 0;
+  } catch (e) {
+    return false;
+  }
+}
+
+// Fallback sampling (may miss some values if not using filters.json)
+async function sampleDistinctValues() {
+  const sampleCenters = [
+    [-96.8, 30.6],
+    [-95.4, 29.8],
+    [-97.7, 30.3],
+    [-96.1, 31.5]
+  ];
+
+  async function tilequery(lngLat) {
+    const [lng, lat] = lngLat;
+    const url =
+      `https://api.mapbox.com/v4/${TILESET_ID}/tilequery/${lng},${lat}.json` +
+      `?radius=60000&limit=50&layers=${encodeURIComponent(SOURCE_LAYER)}` +
+      `&access_token=${encodeURIComponent(MAPBOX_TOKEN)}`;
+
+    const res = await fetch(url);
+    if (!res.ok) return [];
+    const json = await res.json();
+    return (json.features || []).map(f => f.properties || {});
   }
 
-  // If we didn't see any yet (zoomed out / not loaded), skip; it'll try again on moveend.
-  if (seen.size === 0) return;
+  const props = [];
+  for (const c of sampleCenters) props.push(...(await tilequery(c)));
 
-  // Clear existing except first option
-  const keepFirst = select.options[0];
-  select.innerHTML = "";
-  select.appendChild(keepFirst);
+  const branches = new Set();
+  const groups = new Set();
 
-  [...seen].sort((a, b) => Number(a) - Number(b)).forEach((branch) => {
-    const opt = document.createElement("option");
-    opt.value = branch;
-    opt.textContent = `Branch ${branch}`;
-    select.appendChild(opt);
-  });
+  for (const p of props) {
+    if (p.BranchName) branches.add(p.BranchName);
+    if (p.ProductGroupLevel1) groups.add(p.ProductGroupLevel1);
+  }
 
-  // Remove moveend listener after first successful population
-  map.off("moveend", populateBranchDropdownOnce);
+  [...branches].sort().forEach(b => addOption(UI.branchSelect, b, b));
+  [...groups].sort().forEach(g => addOption(UI.groupSelect, g, g));
 }
 
-function fmtMoney(n) {
-  const x = Number(n);
-  if (!isFinite(x)) return "—";
-  return x.toLocaleString(undefined, { style: "currency", currency: "USD", maximumFractionDigits: 0 });
-}
-
-function fmtInt(n) {
-  const x = Number(n);
-  if (!isFinite(x)) return "—";
-  return x.toLocaleString();
-}
-
-map.on("load", () => {
-  map.addSource(SOURCE_ID, {
+map.on("load", async () => {
+  map.addSource("zips-src", {
     type: "vector",
-    url: TILESET_URL
+    url: `mapbox://${TILESET_ID}`
   });
 
-  // Heatmap layer
   map.addLayer({
-    id: HEAT_LAYER_ID,
+    id: "zips-heat",
     type: "heatmap",
-    source: SOURCE_ID,
+    source: "zips-src",
     "source-layer": SOURCE_LAYER,
-    maxzoom: 11,
+    maxzoom: 12,
     paint: {
-      "heatmap-weight": [
-        "interpolate", ["linear"],
-        ["coalesce", ["to-number", ["get", PROP_W_TICKETS]], 0],
-        0, 0,
-        WEIGHT_MAX_TICKETS, 1
+      "heatmap-radius": [
+        "interpolate", ["linear"], ["zoom"],
+        5, 10,
+        8, 25,
+        11, 45
       ],
       "heatmap-intensity": [
-        "interpolate", ["linear"],
-        ["zoom"],
-        5, 1,
-        11, 3
-      ],
-      "heatmap-radius": [
-        "interpolate", ["linear"],
-        ["zoom"],
-        5, 10,
-        11, 35
+        "interpolate", ["linear"], ["zoom"],
+        5, 0.8,
+        11, 1.4
       ],
       "heatmap-opacity": [
-        "interpolate", ["linear"],
-        ["zoom"],
-        7, 0.85,
-        11, 0.35
+        "interpolate", ["linear"], ["zoom"],
+        5, 0.85,
+        12, 0.15
       ]
     }
   });
 
-  // Points layer (for querying + click popups)
   map.addLayer({
-    id: POINT_LAYER_ID,
+    id: "zips-circles",
     type: "circle",
-    source: SOURCE_ID,
+    source: "zips-src",
     "source-layer": SOURCE_LAYER,
-    minzoom: 8.5,
+    minzoom: 9,
     paint: {
-      "circle-radius": 4,
-      "circle-opacity": 0.7
+      "circle-radius": 3,
+      "circle-opacity": 0.35
     }
   });
 
-  // UI wiring
-  document.getElementById("btnTickets").addEventListener("click", () => {
-    mode = "tickets";
-    setActiveButton();
-    applyWeightMode();
-  });
+  const loaded = await tryLoadFiltersJson();
+  if (!loaded) await sampleDistinctValues();
 
-  document.getElementById("btnSales").addEventListener("click", () => {
-    mode = "sales";
-    setActiveButton();
-    applyWeightMode();
-  });
+  wireUI();
+  setActiveMetricButtons();
 
-  document.getElementById("branchSelect").addEventListener("change", (e) => {
-    selectedBranch = e.target.value || "";
-    applyFilters();
-  });
+  // Default date range (optional): set to YTD automatically
+  const now = new Date();
+  const yyyy = now.getFullYear();
+  UI.startDate.value = `${yyyy}-01-01`;
+  UI.endDate.value = now.toISOString().slice(0, 10);
 
-  // Populate branch dropdown once data is visible
-  map.on("moveend", populateBranchDropdownOnce);
-  populateBranchDropdownOnce();
-
-  // Click popup (use points layer for accuracy)
-  map.on("click", POINT_LAYER_ID, (e) => {
-    const f = e.features && e.features[0];
-    if (!f) return;
-
-    const p = f.properties || {};
-    const zip = p[PROP_ZIP] ?? "—";
-    const branch = p[PROP_BRANCH] ?? "—";
-    const date = p[PROP_DATE] ?? "—";
-
-    const tickets = p[PROP_TICKETS];
-    const sales = p[PROP_SALES];
-    const profit = p[PROP_PROFIT];
-
-    const html = `
-      <div style="font-size:12px; line-height:1.35;">
-        <div style="font-weight:700; font-size:13px;">ZIP ${zip}</div>
-        <div>Date: ${date}</div>
-        <div>Branch: ${branch}</div>
-        <hr style="border:none;border-top:1px solid #eee;margin:6px 0;" />
-        <div>Tickets: <b>${fmtInt(tickets)}</b></div>
-        <div>Sales: <b>${fmtMoney(sales)}</b></div>
-        <div>Profit: <b>${fmtMoney(profit)}</b></div>
-      </div>
-    `;
-
-    new mapboxgl.Popup({ closeButton: true })
-      .setLngLat(e.lngLat)
-      .setHTML(html)
-      .addTo(map);
-  });
-
-  // Cursor pointer on hover
-  map.on("mouseenter", POINT_LAYER_ID, () => map.getCanvas().style.cursor = "pointer");
-  map.on("mouseleave", POINT_LAYER_ID, () => map.getCanvas().style.cursor = "");
+  applyFiltersAndMetric();
 });
