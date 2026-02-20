@@ -6,7 +6,7 @@
    - Filter: branch
    ========================= */
 
-mapboxgl.accessToken = "PASTE_YOUR_MAPBOX_TOKEN_HERE";
+mapboxgl.accessToken = "pk.eyJ1IjoiY2t1bmtlbCIsImEiOiJjbWx1Yjc4ODIwOW51M2Zwdm15dHFodnh1In0.F2yytru7jt9khYyPziZrHw";
 
 // Your tileset + source layer
 const TILESET_URL = "mapbox://ckunkel.bp872kqi";
