@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Zip Heatmap (Tickets / Sales)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <link href="https://api.mapbox.com/mapbox-gl-js/v3.6.0/mapbox-gl.css" rel="stylesheet" />
+  <style>
+    body { margin: 0; padding: 0; font-family: Arial, sans-serif; }
+    #map { position: absolute; top: 0; bottom: 0; width: 100%; }
+
+    .controls {
+      position: absolute;
+      top: 12px;
+      left: 12px;
+      z-index: 2;
+      background: #fff;
+      border-radius: 10px;
+      padding: 10px 12px;
+      box-shadow: 0 2px 12px rgba(0,0,0,.18);
+      display: grid;
+      gap: 8px;
+      min-width: 220px;
+    }
+
+    .row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+
+    button {
+      border: 1px solid #ddd;
+      background: #f7f7f7;
+      padding: 8px 10px;
+      border-radius: 8px;
+      cursor: pointer;
+      font-weight: 600;
+    }
+    button.active {
+      background: #111;
+      color: #fff;
+      border-color: #111;
+    }
+
+    select {
+      width: 100%;
+      padding: 8px 10px;
+      border-radius: 8px;
+      border: 1px solid #ddd;
+      background: #fff;
+    }
+
+    .hint {
+      font-size: 12px;
+      color: #444;
+      line-height: 1.25;
+    }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+
+  <div class="controls">
+    <div class="row">
+      <button id="btnTickets" class="active">Tickets</button>
+      <button id="btnSales">Sales</button>
+    </div>
+
+    <div>
+      <select id="branchSelect">
+        <option value="">All branches</option>
+      </select>
+    </div>
+
+    <div class="hint">
+      Click a hotspot to see ZIP + metrics.<br/>
+      If nothing shows, verify <b>source-layer</b> name matches your tileset.
+    </div>
+  </div>
+
+  <script src="https://api.mapbox.com/mapbox-gl-js/v3.6.0/mapbox-gl.js"></script>
+  <script src="./app.js"></script>
+</body>
+</html>
