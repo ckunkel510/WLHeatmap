@@ -326,6 +326,7 @@ if (canDateFilter) {
   const HEAT_LAYER_ID = "wl-heat";
   const POINT_LAYER_ID = "wl-points";
 
+  const HIT_LAYER_ID = "wl-points-hit";
   function ensureLayers() {
     if (!map.getSource(SOURCE_ID)) {
       map.addSource(SOURCE_ID, {
@@ -398,6 +399,28 @@ if (canDateFilter) {
         },
       });
     }
+
+    // Invisible-but-clickable "hit" layer to make points easier to tap/click (keeps visual styling unchanged)
+    // - Uses a much larger radius
+    // - Nearly transparent but still interactive
+    if (!map.getLayer(HIT_LAYER_ID)) {
+      map.addLayer({
+        id: HIT_LAYER_ID,
+        type: "circle",
+        source: SOURCE_ID,
+        "source-layer": SOURCE_LAYER,
+        paint: {
+          "circle-radius": [
+            "interpolate", ["linear"], ["zoom"],
+            6, 12,
+            9, 18,
+            12, 26
+          ],
+          "circle-color": "#000000",
+          "circle-opacity": 0.001,
+        },
+      });
+    }
   }
 
   function updateMetricPaint() {
@@ -451,6 +474,12 @@ try {
   if (map.getLayer(POINT_LAYER_ID)) map.setFilter(POINT_LAYER_ID, filterExpr);
 } catch (e) {
   console.error("[WLHeatmap][DEBUG] setFilter wl-points failed", e, filterExpr);
+}
+
+try {
+  if (map.getLayer(HIT_LAYER_ID)) map.setFilter(HIT_LAYER_ID, filterExpr);
+} catch (e) {
+  console.error("[WLHeatmap][DEBUG] setFilter wl-points-hit failed", e, filterExpr);
 }
 
   // Date filter note (tileset must include numeric `SaleDateKey` to enable date filtering)
@@ -653,19 +682,19 @@ function wirePointHoverTooltip() {
   const getProp = (p, key) => (p && p[key] != null ? p[key] : undefined);
 
   const bindHandlers = () => {
-    if (!map.getLayer(POINT_LAYER_ID)) return false;
+    if (!map.getLayer(HIT_LAYER_ID) || !map.getLayer(POINT_LAYER_ID)) return false;
 
-    map.on("mouseenter", POINT_LAYER_ID, () => {
+    map.on("mouseenter", HIT_LAYER_ID, () => {
       map.getCanvas().style.cursor = "pointer";
     });
 
-    map.on("mouseleave", POINT_LAYER_ID, () => {
+    map.on("mouseleave", HIT_LAYER_ID, () => {
       map.getCanvas().style.cursor = "";
       hoverPopup.remove();
     });
 
     // Click-to-show tooltip (more reliable + lighter than hover in BisTrack embedded dashboards)
-map.on("click", POINT_LAYER_ID, (e) => {
+map.on("click", HIT_LAYER_ID, (e) => {
   const f = e.features && e.features[0];
   if (!f) return;
 
