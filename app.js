@@ -694,7 +694,7 @@ map.on("mousemove", POINT_LAYER_ID, (e) => {
   }
 }
 
-map.on("load"map.on("load", () => {
+  map.on("load", () => {
       log("Map loaded. Adding layers...");
       ensureLayers();
       wirePointHoverTooltip();
