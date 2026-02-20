@@ -1,139 +1,92 @@
-USE [btprod];
-GO
-SET ANSI_NULLS ON;
-GO
-SET QUOTED_IDENTIFIER ON;
-GO
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>WL Zip Heatmap</title>
 
-/* =========================
-   cwk_RefreshZipSalesDaily
-   - Deletes the target date window first (prevents stale/duplicate keys)
-   - Rebuilds aggregates for the window
-   - Uses COUNT(DISTINCT DocumentID) so TicketCount is true “ticket” count (not line count)
-   ========================= */
-ALTER PROCEDURE [dbo].[cwk_RefreshZipSalesDaily]
-    @StartDate date = NULL,          -- NULL = from earliest available
-    @EndDate   date = NULL,          -- NULL = today
-    @RecalcDaysBack int = 7          -- rolling window for late changes
-AS
-BEGIN
-    SET NOCOUNT ON;
+  <link href="https://api.mapbox.com/mapbox-gl-js/v3.6.0/mapbox-gl.css" rel="stylesheet" />
+  <style>
+    html, body { margin:0; padding:0; height:100%; font-family: Arial, sans-serif; }
+    #app { display:flex; height:100%; }
+    #sidebar {
+      width: 360px;
+      padding: 14px;
+      border-right: 1px solid #e5e5e5;
+      box-sizing: border-box;
+      background:#fff;
+    }
+    #map { flex:1; }
+    .row { margin-bottom: 12px; }
+    label { display:block; font-size: 12px; margin-bottom:6px; color:#444; }
+    select, button, input {
+      width:100%;
+      padding: 10px;
+      border: 1px solid #ccc;
+      border-radius: 8px;
+      background:#fff;
+      font-size: 14px;
+      box-sizing: border-box;
+    }
+    .btnRow { display:flex; gap:10px; }
+    .btnRow button { width: 50%; cursor:pointer; }
+    .activeBtn { border-color:#111; font-weight:700; }
+    .grid2 { display:grid; grid-template-columns: 1fr 1fr; gap:10px; }
+    .note { font-size: 12px; color:#666; line-height: 1.4; }
+    .small { font-size: 12px; color:#666; }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <div id="sidebar">
+      <h2 style="margin:0 0 10px 0;">Zip Heatmap</h2>
+      <div class="small" style="margin-bottom:10px;">
+        Filter by Branch + Product Group + Date Range. Toggle Sales vs Tickets.
+      </div>
 
-    DECLARE @Today date = CONVERT(date, GETDATE());
+      <div class="row">
+        <label for="branchSelect">Branch</label>
+        <select id="branchSelect">
+          <option value="__all__">All Branches</option>
+        </select>
+      </div>
 
-    IF @EndDate IS NULL
-        SET @EndDate = @Today;
+      <div class="row">
+        <label for="groupSelect">Product Group (Level 1)</label>
+        <select id="groupSelect">
+          <option value="__all__">All Groups</option>
+        </select>
+      </div>
 
-    IF @StartDate IS NULL
-    BEGIN
-        -- First run: full history
-        SELECT @StartDate = MIN(CONVERT(date, DocumentDate))
-        FROM dbo.SalesAnalysis3;
-    END
-    ELSE
-    BEGIN
-        -- Normal run: back up a few days to catch late posting/edits
-        SET @StartDate = DATEADD(day, -@RecalcDaysBack, @StartDate);
-    END
+      <div class="row">
+        <label>Date range (SaleDate)</label>
+        <div class="grid2">
+          <input id="startDate" type="date" />
+          <input id="endDate" type="date" />
+        </div>
+        <div style="margin-top:10px;" class="grid2">
+          <button id="applyDates" type="button">Apply</button>
+          <button id="clearDates" type="button">Clear</button>
+        </div>
+      </div>
 
-    /* ==========================================================
-       1) DELETE the target window first to prevent stale/duplicate rows
-          (anything in this window will be rebuilt from scratch)
-       ========================================================== */
-    DELETE FROM dbo.cwk_ZipSalesDaily
-    WHERE SaleDate >= @StartDate
-      AND SaleDate <  DATEADD(day, 1, @EndDate);
+      <div class="row">
+        <label>Metric</label>
+        <div class="btnRow">
+          <button id="metricSales" class="activeBtn" type="button">Sales</button>
+          <button id="metricTickets" type="button">Tickets</button>
+        </div>
+      </div>
 
-    /* ==========================================================
-       2) Rebuild aggregates for the window
-       ========================================================== */
-    ;WITH Agg AS (
-        SELECT
-            CONVERT(date, sa3.DocumentDate) AS SaleDate,
-            sa3.BranchID,
-            b.Name AS BranchName,
-            z.Zip5 AS PostCode,
-            pg.Level1 AS ProductGroupLevel1,
+      <div class="row note">
+        Tip: If dropdowns look incomplete, add a <code>filters.json</code> file (optional).
+      </div>
+    </div>
 
-            COUNT(DISTINCT sa3.DocumentID) AS TicketCount,
-            SUM(sa3.TotalSales) AS TotalSales,
-            SUM(sa3.TotalSales - sa3.TotalCost) AS TotalProfit,
-            CAST(SUM(sa3.TotalSales) AS decimal(18,2)) / NULLIF(COUNT(DISTINCT sa3.DocumentID), 0) AS AvgTicket,
-            SUM(CASE WHEN z.UsedBranchFallback = 1 THEN 1 ELSE 0 END) AS FallbackToBranchCount
-        FROM dbo.SalesAnalysis3 sa3
-        INNER JOIN dbo.CustomerAddress ca
-            ON ca.CustomerAddressID = sa3.CustomerAddressID
-        LEFT JOIN dbo.Branch b
-            ON b.BranchID = sa3.BranchID
-        LEFT JOIN dbo.jrhProductGroup pg
-            ON pg.ProductID = sa3.ProductID
+    <div id="map"></div>
+  </div>
 
-        OUTER APPLY (
-            SELECT
-                caTrim = NULLIF(LTRIM(RTRIM(ca.PostCode)), ''),
-                bTrim  = NULLIF(LTRIM(RTRIM(b.PostCode)), '')
-        ) t
-
-        OUTER APPLY (
-            SELECT
-                caZip5 =
-                    CASE
-                        WHEN LEFT(t.caTrim, 5) LIKE '[0-9][0-9][0-9][0-9][0-9]'
-                            THEN LEFT(t.caTrim, 5)
-                    END,
-                bZip5 =
-                    CASE
-                        WHEN LEFT(t.bTrim, 5) LIKE '[0-9][0-9][0-9][0-9][0-9]'
-                            THEN LEFT(t.bTrim, 5)
-                    END
-        ) z1
-
-        OUTER APPLY (
-            SELECT
-                Zip5 = COALESCE(z1.caZip5, z1.bZip5),
-                UsedBranchFallback = CASE WHEN z1.caZip5 IS NULL AND z1.bZip5 IS NOT NULL THEN 1 ELSE 0 END
-        ) z
-
-        WHERE
-            sa3.DocumentDate >= @StartDate
-            AND sa3.DocumentDate < DATEADD(day, 1, @EndDate)
-            AND sa3.BranchID IS NOT NULL
-            AND z.Zip5 IS NOT NULL
-            AND pg.Level1 IS NOT NULL   -- keep rows clean; remove if you want Unknown bucket
-
-        GROUP BY
-            CONVERT(date, sa3.DocumentDate),
-            sa3.BranchID,
-            b.Name,
-            z.Zip5,
-            pg.Level1
-    )
-    INSERT INTO dbo.cwk_ZipSalesDaily (
-        SaleDate,
-        BranchID,
-        BranchName,
-        PostCode,
-        ProductGroupLevel1,
-        TicketCount,
-        TotalSales,
-        TotalProfit,
-        AvgTicket,
-        FallbackToBranchCount,
-        LastUpdatedUtc
-    )
-    SELECT
-        a.SaleDate,
-        a.BranchID,
-        a.BranchName,
-        a.PostCode,
-        a.ProductGroupLevel1,
-        a.TicketCount,
-        a.TotalSales,
-        a.TotalProfit,
-        a.AvgTicket,
-        a.FallbackToBranchCount,
-        SYSUTCDATETIME()
-    FROM Agg a;
-
-END;
-GO
+  <script src="https://api.mapbox.com/mapbox-gl-js/v3.6.0/mapbox-gl.js"></script>
+  <script src="./app.js"></script>
+</body>
+</html>
