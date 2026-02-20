@@ -1,1 +1,4 @@
-{"productGroups":[{"value":"Animals\/Pets"},{"value":"Automotive"},{"value":"Bolts, Screws, Etc."},{"value":"Concrete"},{"value":"Door Shop"},{"value":"Doors"},{"value":"Electrical"},{"value":"Farm\/Ranch"},{"value":"Floors & Ceilings"},{"value":"Food & Drinks"},{"value":"Gifts, Clothing, & Accessories"},{"value":"Gypsum"},{"value":"Hardware"},{"value":"Heating & Cooling"},{"value":"Holiday Decorations"},{"value":"Housewares"},{"value":"Insulation"},{"value":"Lawn & Garden"},{"value":"Lumber"},{"value":"Manufactured Building Products"},{"value":"Moulding"},{"value":"Nails"},{"value":"Outdoor"},{"value":"Paint & Sundries"},{"value":"Plumbing"},{"value":"Plywood, OSB, Sheet Goods"},{"value":"Poly"},{"value":"Rebar"},{"value":"Roofing"},{"value":"Specials"},{"value":"TBD"},{"value":"Tools"},{"value":"Windows"}],"branches":[{"value":"Brenham"},{"value":"Bryan"},{"value":"Buffalo"},{"value":"Caldwell"},{"value":"Door Shop"},{"value":"Groesbeck"},{"value":"Lexington"},{"value":"Mexia"}]}
+{
+  "branches": ["Brenham","Bryan","Caldwell","Lexington","Groesbeck","Mexia","Buffalo"],
+  "productGroupsLevel1": ["Automotive","Lumber","Hardware","Paint","Plumbing"]
+}
