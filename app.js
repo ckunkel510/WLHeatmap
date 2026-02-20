@@ -74,32 +74,34 @@
 
   // Build numeric YYYYMMDD from the tileset's M/D/YYYY string in "﻿SaleDate"
   // Example: "2/11/2026" => 20260211
-  function saleDateKeyFromBOMExpr() {
-    const ds = [
-      "to-string",
-      [
-        "coalesce",
-        ["get", BOM_SALEDATE_FIELD], // the actual one you have
-        ["get", "SaleDate"],         // just in case
-        ""
-      ]
-    ];
+ // Build numeric YYYYMMDD from the tileset's M/D/YYYY string in "﻿SaleDate"
+// Example: "2/11/2026" => 20260211
+function saleDateKeyFromBOMExpr() {
+  const ds = [
+    "to-string",
+    [
+      "coalesce",
+      ["get", BOM_SALEDATE_FIELD], // the actual one you have
+      ["get", "SaleDate"],         // just in case
+      ""
+    ]
+  ];
 
-    const parts = ["split", ds, "/"]; // ["2","11","2026"]
+  const parts = ["split", ds, "/"]; // ["2","11","2026"]
 
-    // y = parts[2], m = parts[0], d = parts[1]
-    const y = ["to-number", ["at", parts, 2], 0];
-    const m = ["to-number", ["at", parts, 0], 0];
-    const d = ["to-number", ["at", parts, 1], 0];
+  // y = parts[2], m = parts[0], d = parts[1]
+  const y = ["to-number", ["at", 2, parts], 0];
+  const m = ["to-number", ["at", 0, parts], 0];
+  const d = ["to-number", ["at", 1, parts], 0];
 
-    // If we don't have at least 3 parts, return 0
-    return [
-      "case",
-      [">=", ["length", parts], 3],
-      ["+", ["*", y, 10000], ["*", m, 100], d],
-      0
-    ];
-  }
+  // If we don't have at least 3 parts, return 0
+  return [
+    "case",
+    [">=", ["length", parts], 3],
+    ["+", ["*", y, 10000], ["*", m, 100], d],
+    0
+  ];
+}
 
   function buildFilterExpr() {
     const expr = ["all"];
