@@ -511,57 +511,140 @@ function wirePointHoverTooltip() {
     });
 
     map.on("mousemove", POINT_LAYER_ID, (e) => {
-      const f = e.features && e.features[0];
-      if (!f) return;
 
-      const p = f.properties || {};
+const f = e.features && e.features[0];
+if (!f) return;
 
-      const branch = getProp(p, "BranchName") ?? "—";
-      const zip = getProp(p, "Zip5") ?? "—";
-      const group = getProp(p, "ProductGroupLevel1") ?? "—";
+const p0 = f.properties || {};
+const zip = getProp(p0, "Zip5") ?? "—";
+const branch = getProp(p0, "BranchName") ?? "—";
 
-      // Dates: prefer BOM SaleDate (M/D/YYYY), fall back to ISO if present
-      const saleDate =
-        getProp(p, BOM_SALEDATE_FIELD) ??
-        getProp(p, "SaleDate") ??
-        getProp(p, "\ufeffSaleDateISO") ??
-        getProp(p, "SaleDateISO") ??
-        "—";
+// Pull all currently rendered + filtered point features (viewport only)
+const feats = map.queryRenderedFeatures({ layers: [POINT_LAYER_ID] }) || [];
 
-      const tickets = getProp(p, "TicketCount") ?? 0;
-      const sales = getProp(p, "TotalSales") ?? 0;
-      const profit = getProp(p, "TotalProfit") ?? 0;
+// Aggregate by same Zip + Branch (change to Zip-only if you prefer)
+let ticketsSum = 0;
+let salesSum = 0;
+let profitSum = 0;
 
-      // Coordinates: prefer geometry point, fall back to Lon/Lat props if needed
-      let coords = null;
-      if (f.geometry && f.geometry.type === "Point" && Array.isArray(f.geometry.coordinates)) {
-        coords = f.geometry.coordinates.slice();
-      } else {
-        const lon = Number(getProp(p, "Lon"));
-        const lat = Number(getProp(p, "Lat"));
-        if (isFinite(lon) && isFinite(lat)) coords = [lon, lat];
-      }
-      if (!coords) return;
+// Optional: group breakdown when Group filter is "All"
+const byGroup = new Map();
 
-      // Handle world-wrap
-      while (Math.abs(e.lngLat.lng - coords[0]) > 180) {
-        coords[0] += e.lngLat.lng > coords[0] ? 360 : -360;
-      }
+// Optional: date span shown (min/max sale date among matched feats)
+let minDate = null;
+let maxDate = null;
 
-      const html = `
-        <div style="font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;">
-          <div style="font-weight:700; font-size:13px; margin-bottom:6px;">${zip} • ${branch}</div>
-          <div style="font-size:12px; opacity:.9; margin-bottom:8px;">${saleDate}</div>
-          <div style="font-size:12px; margin-bottom:8px;"><b>Group:</b> ${group}</div>
-          <div style="display:grid; grid-template-columns: 1fr 1fr; gap:8px; font-size:12px;">
-            <div><b>Tickets</b><br>${fmtNum(tickets)}</div>
-            <div><b>Sales</b><br>${fmtMoney(sales)}</div>
-            <div><b>Profit</b><br>${fmtMoney(profit)}</div>
-          </div>
-        </div>
-      `;
+for (const ft of feats) {
+  const p = ft.properties || {};
+  const z = getProp(p, "Zip5");
+  const b = getProp(p, "BranchName");
+  if (String(z) !== String(zip)) continue;
+  if (String(b) !== String(branch)) continue;
 
-      hoverPopup.setLngLat(coords).setHTML(html).addTo(map);
+  const t = Number(getProp(p, "TicketCount")) || 0;
+  const s = Number(getProp(p, "TotalSales")) || 0;
+  const pr = Number(getProp(p, "TotalProfit")) || 0;
+
+  ticketsSum += t;
+  salesSum += s;
+  profitSum += pr;
+
+  const g = String(getProp(p, "ProductGroupLevel1") ?? "—");
+  if (state.group === "__ALL__") {
+    const cur = byGroup.get(g) || { tickets: 0, sales: 0, profit: 0 };
+    cur.tickets += t;
+    cur.sales += s;
+    cur.profit += pr;
+    byGroup.set(g, cur);
+  }
+
+  const sd =
+    getProp(p, BOM_SALEDATE_FIELD) ??
+    getProp(p, "SaleDate") ??
+    getProp(p, "\ufeffSaleDateISO") ??
+    getProp(p, "SaleDateISO") ??
+    null;
+
+  if (sd) {
+    const str = String(sd);
+    const dt = new Date(str);
+    if (!isNaN(dt.getTime())) {
+      if (!minDate || dt < minDate) minDate = dt;
+      if (!maxDate || dt > maxDate) maxDate = dt;
+    }
+  }
+}
+
+// Coordinates: use the hovered feature geometry (most accurate)
+let coords = null;
+if (f.geometry && f.geometry.type === "Point" && Array.isArray(f.geometry.coordinates)) {
+  coords = f.geometry.coordinates.slice();
+} else {
+  const lon = Number(getProp(p0, "Lon"));
+  const lat = Number(getProp(p0, "Lat"));
+  if (isFinite(lon) && isFinite(lat)) coords = [lon, lat];
+}
+if (!coords) return;
+
+while (Math.abs(e.lngLat.lng - coords[0]) > 180) {
+  coords[0] += e.lngLat.lng > coords[0] ? 360 : -360;
+}
+
+const dateLine = (() => {
+  if (minDate && maxDate) {
+    const a = formatMDY(minDate);
+    const b = formatMDY(maxDate);
+    return (a === b) ? a : `${a} → ${b}`;
+  }
+  const hoveredDate =
+    getProp(p0, BOM_SALEDATE_FIELD) ??
+    getProp(p0, "SaleDate") ??
+    getProp(p0, "\ufeffSaleDateISO") ??
+    getProp(p0, "SaleDateISO") ??
+    "—";
+  return hoveredDate;
+})();
+
+// Build a small breakdown list (top 6 by sales)
+let breakdownHtml = "";
+if (state.group === "__ALL__" && byGroup.size) {
+  const rows = Array.from(byGroup.entries())
+    .map(([g, v]) => ({ g, ...v }))
+    .sort((a, b) => b.sales - a.sales)
+    .slice(0, 6);
+
+  breakdownHtml =
+    `<div style="margin-top:10px; font-size:12px;">` +
+    `<div style="font-weight:700; margin-bottom:6px;">Top groups (viewport)</div>` +
+    rows.map(r =>
+      `<div style="display:flex; justify-content:space-between; gap:10px;">` +
+        `<span style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:180px;">${r.g}</span>` +
+        `<span>${fmtMoney(r.sales)}</span>` +
+      `</div>`
+    ).join("") +
+    `</div>`;
+}
+
+const html = `
+  <div style="font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;">
+    <div style="font-weight:700; font-size:13px; margin-bottom:6px;">${zip} • ${branch}</div>
+    <div style="font-size:12px; opacity:.9; margin-bottom:8px;">${dateLine}</div>
+    <div style="font-size:12px; margin-bottom:8px;">
+      <b>Scope:</b> ${state.group === "__ALL__" ? "All groups" : state.group} • ${state.branch === "__ALL__" ? "All branches" : state.branch}
+    </div>
+    <div style="display:grid; grid-template-columns: 1fr 1fr; gap:8px; font-size:12px;">
+      <div><b>Tickets</b><br>${fmtNum(ticketsSum)}</div>
+      <div><b>Sales</b><br>${fmtMoney(salesSum)}</div>
+      <div><b>Profit</b><br>${fmtMoney(profitSum)}</div>
+    </div>
+    ${breakdownHtml}
+    <div style="margin-top:8px; font-size:11px; opacity:.7;">
+      Note: totals are for currently rendered points in the viewport (and respect your filters).
+    </div>
+  </div>
+`;
+
+hoverPopup.setLngLat(coords).setHTML(html).addTo(map);
     });
 
     return true;
