@@ -582,6 +582,12 @@ function wirePointHoverTooltip() {
       hoverPopup.remove();
     });
 
+    map.on("click", POINT_LAYER_ID, (e) => {
+      // Pin popup on click (same content as hover)
+      // Prevent default map click behavior
+      e.preventDefault();
+    });
+
     // Keep hover updates light: lookup pre-aggregated values in cache.
 let rafPending = false;
 let lastHoverKey = "";
