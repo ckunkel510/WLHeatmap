@@ -77,32 +77,24 @@
  // Build numeric YYYYMMDD from the tileset's M/D/YYYY string in "﻿SaleDate"
 // Example: "2/11/2026" => 20260211
 function saleDateKeyFromBOMExpr() {
-  // Pull the sale date string. Prefer BOM field, fallback to normal.
   const ds = [
     "to-string",
     [
       "coalesce",
-      ["get", BOM_SALEDATE_FIELD],
+      ["get", BOM_SALEDATE_FIELD], // "\ufeffSaleDate"
       ["get", "SaleDate"],
       ""
     ]
   ];
 
-  // "M/D/YYYY" -> ["M","D","YYYY"]
-  const parts = ["split", ds, "/"];
+  const parts = ["split", ds, "/"]; // ["M","D","YYYY"] (strings)
 
-  // Mapbox-safe numeric conversions (avoid to-number "fallback" ambiguity)
   const y = ["coalesce", ["to-number", ["at", 2, parts]], 0];
   const m = ["coalesce", ["to-number", ["at", 0, parts]], 0];
   const d = ["coalesce", ["to-number", ["at", 1, parts]], 0];
 
-  // If it doesn't look like M/D/YYYY, return 0
-  return [
-    "case",
-    [">=", ["length", parts], 3],
-    ["+", ["*", y, 10000], ["*", m, 100], d],
-    0
-  ];
+  // Always numeric YYYYMMDD (or 0 if invalid)
+  return ["+", ["*", y, 10000], ["*", m, 100], d];
 }
 
   function buildFilterExpr() {
