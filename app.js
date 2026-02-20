@@ -342,6 +342,11 @@ try {
   console.error("[WLHeatmap][DEBUG] setFilter wl-points failed", e, filterExpr);
 }
 
+  // Date filter note (tileset must include numeric `SaleDateKey` to enable date filtering)
+  const canDateFilterNow = (state.startKey != null || state.endKey != null) ? tilesetHasSaleDateKey() : true;
+  const dateNote = (canDateFilterNow ? "" : " (SaleDateKey missing in tileset — date filter skipped)");
+
+
     setStatus(
       `Metric: ${METRICS[state.metric].label} • ` +
       `Branch: ${state.branch === "__ALL__" ? "All" : state.branch} • ` +
