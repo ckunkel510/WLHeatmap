@@ -3,90 +3,115 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>WL Zip Heatmap</title>
+  <title>Woodson Zip Sales Heatmap</title>
 
+  <!-- Mapbox GL JS -->
   <link href="https://api.mapbox.com/mapbox-gl-js/v3.6.0/mapbox-gl.css" rel="stylesheet" />
+  <script src="https://api.mapbox.com/mapbox-gl-js/v3.6.0/mapbox-gl.js"></script>
+
+  <!-- Optional: your favicon (adjust path if you have one) -->
+  <link rel="icon" href="favicon.ico" />
+
   <style>
-    html, body { margin:0; padding:0; height:100%; font-family: Arial, sans-serif; }
-    #app { display:flex; height:100%; }
+    html, body { height: 100%; margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
+    #app { height: 100%; display: flex; }
     #sidebar {
-      width: 360px;
-      padding: 14px;
-      border-right: 1px solid #e5e5e5;
+      width: 320px;
+      max-width: 90vw;
+      padding: 12px;
       box-sizing: border-box;
-      background:#fff;
+      border-right: 1px solid #e5e7eb;
+      background: #fff;
+      overflow: auto;
     }
-    #map { flex:1; }
-    .row { margin-bottom: 12px; }
-    label { display:block; font-size: 12px; margin-bottom:6px; color:#444; }
-    select, button, input {
-      width:100%;
-      padding: 10px;
-      border: 1px solid #ccc;
+    #map { flex: 1; min-width: 0; }
+    .row { margin-bottom: 10px; }
+    label { display: block; font-size: 12px; margin-bottom: 4px; color: #374151; }
+    select, input, button {
+      width: 100%;
+      padding: 8px 10px;
+      box-sizing: border-box;
+      border: 1px solid #d1d5db;
       border-radius: 8px;
-      background:#fff;
       font-size: 14px;
-      box-sizing: border-box;
     }
-    .btnRow { display:flex; gap:10px; }
-    .btnRow button { width: 50%; cursor:pointer; }
-    .activeBtn { border-color:#111; font-weight:700; }
-    .grid2 { display:grid; grid-template-columns: 1fr 1fr; gap:10px; }
-    .note { font-size: 12px; color:#666; line-height: 1.4; }
-    .small { font-size: 12px; color:#666; }
+    .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .btnRow { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    button { cursor: pointer; background: #111827; color: #fff; border: none; }
+    button.secondary { background: #6b7280; }
+    .small { font-size: 12px; color: #6b7280; }
+    .toggles { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .toggleBtn {
+      background: #f3f4f6;
+      color: #111827;
+      border: 1px solid #d1d5db;
+    }
+    .toggleBtn.active {
+      background: #111827;
+      color: #fff;
+      border-color: #111827;
+    }
   </style>
 </head>
+
 <body>
   <div id="app">
     <div id="sidebar">
-      <h2 style="margin:0 0 10px 0;">Zip Heatmap</h2>
-      <div class="small" style="margin-bottom:10px;">
-        Filter by Branch + Product Group + Date Range. Toggle Sales vs Tickets.
+      <h2 style="margin: 0 0 10px 0;">Zip Sales Heatmap</h2>
+      <div class="small" style="margin-bottom: 12px;">
+        Filter by Branch, Product Group, and Date Range. Toggle metric between Sales and Tickets.
       </div>
 
       <div class="row">
         <label for="branchSelect">Branch</label>
         <select id="branchSelect">
-          <option value="__all__">All Branches</option>
+          <option value="__ALL__">All branches</option>
         </select>
       </div>
 
       <div class="row">
         <label for="groupSelect">Product Group (Level 1)</label>
         <select id="groupSelect">
-          <option value="__all__">All Groups</option>
+          <option value="__ALL__">All product groups</option>
         </select>
       </div>
 
-      <div class="row">
-        <label>Date range (SaleDate)</label>
-        <div class="grid2">
+      <div class="row grid2">
+        <div>
+          <label for="startDate">Start date</label>
           <input id="startDate" type="date" />
-          <input id="endDate" type="date" />
         </div>
-        <div style="margin-top:10px;" class="grid2">
-          <button id="applyDates" type="button">Apply</button>
-          <button id="clearDates" type="button">Clear</button>
+        <div>
+          <label for="endDate">End date</label>
+          <input id="endDate" type="date" />
         </div>
       </div>
 
       <div class="row">
         <label>Metric</label>
-        <div class="btnRow">
-          <button id="metricSales" class="activeBtn" type="button">Sales</button>
-          <button id="metricTickets" type="button">Tickets</button>
+        <div class="toggles">
+          <button id="metricSales" class="toggleBtn active" type="button">Sales</button>
+          <button id="metricTickets" class="toggleBtn" type="button">Tickets</button>
         </div>
       </div>
 
-      <div class="row note">
-        Tip: If dropdowns look incomplete, add a <code>filters.json</code> file (optional).
+      <div class="row btnRow">
+        <button id="applyBtn" type="button">Apply</button>
+        <button id="clearBtn" type="button" class="secondary">Clear</button>
       </div>
+
+      <div class="small" id="status" style="margin-top: 10px;"></div>
     </div>
 
     <div id="map"></div>
   </div>
 
-  <script src="https://api.mapbox.com/mapbox-gl-js/v3.6.0/mapbox-gl.js"></script>
-  <script src="./app.js"></script>
+  <!-- ✅ Put your Mapbox token here (public token starts with pk.) -->
+  <script>
+    mapboxgl.accessToken = "pk.eyJ1IjoiY2t1bmtlbCIsImEiOiJjbWx1Yjc4ODIwOW51M2Zwdm15dHFodnh1In0.F2yytru7jt9khYyPziZrHw";
+  </script>
+
+  <!-- Your app logic -->
+  <script src="app.js" defer></script>
 </body>
 </html>
