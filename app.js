@@ -1,372 +1,407 @@
-/* ============================================================
-   WLHeatmap • app.js (FULL FILE • Mapbox GL JS v3-safe)
-   Fixes:
-   - Date parsing supports YYYY-MM-DD AND M/D/YYYY
-   - Numeric expressions use to-number(value, default) (no NaN errors)
-   - Metric toggle Sales/Tickets is click-proof (event delegation)
-   ============================================================ */
+/* app.js — Woodson Zip Sales Heatmap (Mapbox GL JS v3)
+   - Filters: BranchName, ProductGroupLevel1, SaleDateKey range
+   - Metric toggle: TotalSales vs TicketCount
+   - Uses vector tileset source (NOT tilequery) so points persist while panning/zooming
+*/
 
-/*** 1) PUT YOUR TOKEN HERE ***/
-const MAPBOX_TOKEN = "pk.eyJ1IjoiY2t1bmtlbCIsImEiOiJjbWx1Yjc4ODIwOW51M2Zwdm15dHFodnh1In0.F2yytru7jt9khYyPziZrHw";
+(() => {
+  const LOG_PREFIX = "[WLHeatmap]";
+  const log = (...args) => console.log(LOG_PREFIX, ...args);
 
-/*** 2) CONFIG ***/
-const CONFIG = {
-  tilesetId: "ckunkel.bp872kqi",
-  sourceLayer: "MapBox-42vjbp", // must match tileset layer name exactly
-  filtersUrl: "./filters.json",
-  center: [-96.3698, 30.6744],
-  zoom: 6.3,
-  heatmapMaxZoom: 10,
-  pointsMinZoom: 7.25
-};
+  // =========================
+  // ✅ EDIT THESE TWO CONSTANTS
+  // =========================
+  // Tileset id you uploaded (from Mapbox Studio -> Tilesets)
+  const TILESET_ID = "ckunkel.bp872kqi";
 
-const log = (...args) => console.log("[WLHeatmap]", ...args);
-const warn = (...args) => console.warn("[WLHeatmap]", ...args);
+  // Source layer name inside the tileset.
+  // Your console earlier showed: layers=MapBox-42vjbp
+  // That is typically the source-layer name.
+  const SOURCE_LAYER = "MapBox-42vjbp";
 
-function $(id) { return document.getElementById(id); }
+  // Optional: if you changed the filename or folder
+  const FILTERS_URL = "filters.json";
 
-function uniqSorted(arr) {
-  return Array.from(new Set((arr || []).filter(v => v !== null && v !== undefined && String(v).trim() !== "")))
-    .sort((a, b) => String(a).localeCompare(String(b)));
-}
+  // =========================
+  // DOM
+  // =========================
+  const els = {
+    branchSelect: document.getElementById("branchSelect"),
+    groupSelect: document.getElementById("groupSelect"),
+    startDate: document.getElementById("startDate"),
+    endDate: document.getElementById("endDate"),
+    metricSales: document.getElementById("metricSales"),
+    metricTickets: document.getElementById("metricTickets"),
+    applyBtn: document.getElementById("applyBtn"),
+    clearBtn: document.getElementById("clearBtn"),
+    status: document.getElementById("status"),
+  };
 
-function setStatus(text) {
-  const el = $("statusText") || $("status") || $("wlStatus");
-  if (el) el.textContent = text;
-}
+  const setStatus = (msg) => {
+    if (els.status) els.status.textContent = msg || "";
+  };
 
-function fillSelect(selectEl, values, placeholder) {
-  if (!selectEl) return;
-  selectEl.innerHTML = "";
+  // =========================
+  // State
+  // =========================
+  const state = {
+    metric: "sales", // "sales" | "tickets"
+    // filters
+    branch: "__ALL__",
+    group: "__ALL__",
+    startKey: null, // YYYYMMDD int
+    endKey: null,   // YYYYMMDD int
+  };
 
-  const opt0 = document.createElement("option");
-  opt0.value = "";
-  opt0.textContent = placeholder || "All";
-  selectEl.appendChild(opt0);
+  // Metric mapping to tileset properties
+  const METRICS = {
+    sales: {
+      label: "Sales",
+      prop: "TotalSales",
+    },
+    tickets: {
+      label: "Tickets",
+      prop: "TicketCount",
+    },
+  };
 
-  (values || []).forEach((v) => {
-    const opt = document.createElement("option");
-    opt.value = v;
-    opt.textContent = v;
-    selectEl.appendChild(opt);
-  });
-}
-
-/* ------------------------------------------------------------
-   Date parsing:
-   - supports "YYYY-MM-DD" (date input)
-   - supports "M/D/YYYY" or "MM/DD/YYYY" (typed / text input)
-   returns int yyyymmdd or null
-------------------------------------------------------------- */
-function dateStrToKey(dateStr) {
-  if (!dateStr || typeof dateStr !== "string") return null;
-  const s = dateStr.trim();
-
-  // YYYY-MM-DD
-  let m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
-  if (m) {
-    const y = Number(m[1]), mo = Number(m[2]), d = Number(m[3]);
-    if (y && mo >= 1 && mo <= 12 && d >= 1 && d <= 31) return y * 10000 + mo * 100 + d;
-    return null;
+  // =========================
+  // Helpers
+  // =========================
+  function dateToKey(yyyy_mm_dd) {
+    // input from <input type="date"> is "YYYY-MM-DD"
+    if (!yyyy_mm_dd) return null;
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(yyyy_mm_dd);
+    if (!m) return null;
+    const y = Number(m[1]);
+    const mo = Number(m[2]);
+    const d = Number(m[3]);
+    return (y * 10000) + (mo * 100) + d; // YYYYMMDD
   }
 
-  // M/D/YYYY or MM/DD/YYYY
-  m = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(s);
-  if (m) {
-    const mo = Number(m[1]), d = Number(m[2]), y = Number(m[3]);
-    if (y && mo >= 1 && mo <= 12 && d >= 1 && d <= 31) return y * 10000 + mo * 100 + d;
-    return null;
+  function safeToNumberExpr(propName) {
+    // Forces numeric conversion even if Mapbox typed the column as string
+    // to-number(value, fallback) is supported in GL JS v3 expression spec
+    return ["to-number", ["get", propName], 0];
   }
 
-  return null;
-}
+  function buildFilterExpr() {
+    const expr = ["all"];
 
-/* ----------------------------------------------------------------
-   Numeric safety for Mapbox expressions:
-   - use to-number(value, default) so blank/strings never become NaN
------------------------------------------------------------------- */
-function numField(fieldName, fallback = 0) {
-  return ["to-number", ["get", fieldName], fallback];
-}
-
-function metricFieldName(metric) {
-  return metric === "Tickets" ? "TicketCount" : "TotalSales";
-}
-function metricLabel(metric) {
-  return metric === "Tickets" ? "Tickets" : "Sales";
-}
-
-/*** Heatmap paint ***/
-function heatWeightExpr(metric) {
-  // ln(1 + value)
-  return ["ln", ["+", 1, numField(metricFieldName(metric), 0)]];
-}
-function heatIntensityExpr() {
-  return ["interpolate", ["linear"], ["zoom"], 0, 0.6, 7, 1.2, 10, 2.0, 12, 3.0];
-}
-function heatRadiusExpr() {
-  return ["interpolate", ["linear"], ["zoom"], 4, 12, 7, 20, 10, 34, 12, 48];
-}
-function heatColorExpr() {
-  return [
-    "interpolate",
-    ["linear"],
-    ["heatmap-density"],
-    0, "rgba(0,0,0,0)",
-    0.10, "rgba(0,145,255,0.25)",
-    0.25, "rgba(0,145,255,0.55)",
-    0.45, "rgba(0,200,120,0.65)",
-    0.65, "rgba(255,220,0,0.75)",
-    0.85, "rgba(255,120,0,0.85)",
-    1.00, "rgba(255,0,0,0.95)"
-  ];
-}
-
-/*** Points paint ***/
-function circleRadiusExpr(metric) {
-  // interpolate(linear, ln(1+value), ...)
-  return [
-    "interpolate",
-    ["linear"],
-    ["ln", ["+", 1, numField(metricFieldName(metric), 0)]],
-    0, 2,
-    3, 4,
-    6, 7,
-    9, 11
-  ];
-}
-function circleOpacityExpr() {
-  return ["interpolate", ["linear"], ["zoom"], CONFIG.pointsMinZoom, 0.0, CONFIG.pointsMinZoom + 0.75, 0.9];
-}
-
-/*** UI elements (IDs expected in index.html) ***/
-const branchSelect = $("branchSelect");
-const groupSelect = $("groupSelect");
-const startDateInput = $("startDate");
-const endDateInput = $("endDate");
-const metricSalesRadio = $("metricSales");
-const metricTicketsRadio = $("metricTickets");
-const metricSelect = $("metricSelect"); // optional <select> fallback
-const applyBtn = $("applyBtn");
-const clearBtn = $("clearBtn");
-
-let metric = "Sales";
-
-/*** FILTER LISTS ***/
-async function loadFiltersJson() {
-  log("Loading filter lists...");
-  try {
-    const res = await fetch(CONFIG.filtersUrl, { cache: "no-store" });
-    if (!res.ok) throw new Error(`filters.json HTTP ${res.status}`);
-    const json = await res.json();
-
-    const branches = uniqSorted(json.branches || []);
-    const groups = uniqSorted(json.groups || []);
-
-    fillSelect(branchSelect, branches, "All Branches");
-    fillSelect(groupSelect, groups, "All Product Groups");
-
-    // Optional select metric fallback
-    if (metricSelect) {
-      metricSelect.innerHTML = "";
-      ["Sales", "Tickets"].forEach((m) => {
-        const opt = document.createElement("option");
-        opt.value = m;
-        opt.textContent = m;
-        metricSelect.appendChild(opt);
-      });
-      metricSelect.value = metric;
+    // Branch filter
+    if (state.branch && state.branch !== "__ALL__") {
+      expr.push(["==", ["get", "BranchName"], state.branch]);
     }
 
-    log(`Loaded filters.json • ${branches.length} branches • ${groups.length} groups`);
-  } catch (e) {
-    warn("Failed to load filters.json:", e);
-  }
-}
+    // Product group filter
+    if (state.group && state.group !== "__ALL__") {
+      expr.push(["==", ["get", "ProductGroupLevel1"], state.group]);
+    }
 
-/*** BUILD FILTER ***/
-function buildLayerFilter() {
-  const filters = ["all"];
+    // Date range filter (SaleDateKey)
+    // Your data has SaleDateKey like 20260102
+    const dateKeyExpr = safeToNumberExpr("SaleDateKey");
 
-  const branch = branchSelect ? branchSelect.value : "";
-  const group = groupSelect ? groupSelect.value : "";
+    if (state.startKey != null) {
+      expr.push([">=", dateKeyExpr, state.startKey]);
+    }
+    if (state.endKey != null) {
+      expr.push(["<=", dateKeyExpr, state.endKey]);
+    }
 
-  const startKey = dateStrToKey(startDateInput ? startDateInput.value : "");
-  const endKey = dateStrToKey(endDateInput ? endDateInput.value : "");
-
-  if (branch) filters.push(["==", ["get", "BranchName"], branch]);
-  if (group) filters.push(["==", ["get", "ProductGroupLevel1"], group]);
-
-  // SaleDateKey numeric filter (works whether SaleDateKey is stored as string or number)
-  const saleKey = numField("SaleDateKey", 0);
-
-  if (startKey != null) filters.push([">=", saleKey, startKey]);
-  if (endKey != null) filters.push(["<=", saleKey, endKey]);
-
-  return filters;
-}
-
-/*** APPLY ***/
-function applyFilters(map) {
-  const f = buildLayerFilter();
-
-  if (map.getLayer("wl-heat")) map.setFilter("wl-heat", f);
-  if (map.getLayer("wl-points")) map.setFilter("wl-points", f);
-
-  if (map.getLayer("wl-heat")) {
-    map.setPaintProperty("wl-heat", "heatmap-weight", heatWeightExpr(metric));
-    map.setPaintProperty("wl-heat", "heatmap-intensity", heatIntensityExpr());
-    map.setPaintProperty("wl-heat", "heatmap-radius", heatRadiusExpr());
-    map.setPaintProperty("wl-heat", "heatmap-color", heatColorExpr());
+    return expr;
   }
 
-  if (map.getLayer("wl-points")) {
-    map.setPaintProperty("wl-points", "circle-radius", circleRadiusExpr(metric));
-    map.setPaintProperty("wl-points", "circle-opacity", circleOpacityExpr());
+  function setMetricUI(metric) {
+    state.metric = metric;
+
+    if (els.metricSales && els.metricTickets) {
+      const isSales = metric === "sales";
+      els.metricSales.classList.toggle("active", isSales);
+      els.metricTickets.classList.toggle("active", !isSales);
+    }
+    log("Metric set to", METRICS[metric].label);
   }
 
-  log(`Applied filters • Metric: ${metricLabel(metric)} • StartKey=${dateStrToKey(startDateInput?.value || "")} • EndKey=${dateStrToKey(endDateInput?.value || "")}`);
-  setStatus(`Metric: ${metricLabel(metric)}`);
-}
+  // =========================
+  // Map init
+  // =========================
+  log("Booting...");
 
-/*** CLEAR ***/
-function clearFilters(map) {
-  if (branchSelect) branchSelect.value = "";
-  if (groupSelect) groupSelect.value = "";
-  if (startDateInput) startDateInput.value = "";
-  if (endDateInput) endDateInput.value = "";
-
-  setMetric("Sales", map);
-  applyFilters(map);
-}
-
-/*** METRIC (click-proof) ***/
-function setMetric(newMetric, map) {
-  metric = newMetric === "Tickets" ? "Tickets" : "Sales";
-
-  if (metricSalesRadio) metricSalesRadio.checked = metric === "Sales";
-  if (metricTicketsRadio) metricTicketsRadio.checked = metric === "Tickets";
-  if (metricSelect) metricSelect.value = metric;
-
-  log(`Metric set to ${metricLabel(metric)}`);
-  applyFilters(map);
-}
-
-function wireMetricControls(map) {
-  // Normal wiring (change/click)
-  if (metricSalesRadio) {
-    metricSalesRadio.addEventListener("change", () => metricSalesRadio.checked && setMetric("Sales", map));
-    metricSalesRadio.addEventListener("click", () => setMetric("Sales", map));
-  }
-  if (metricTicketsRadio) {
-    metricTicketsRadio.addEventListener("change", () => metricTicketsRadio.checked && setMetric("Tickets", map));
-    metricTicketsRadio.addEventListener("click", () => setMetric("Tickets", map));
-  }
-  if (metricSelect) {
-    metricSelect.addEventListener("change", () => setMetric(metricSelect.value, map));
-  }
-
-  // Event delegation fallback:
-  // If labels/containers are being clicked but radios don't receive click (overlay/label mismatch),
-  // this still toggles based on "metricSales"/"metricTickets" IDs or data-metric attributes.
-  document.addEventListener("click", (e) => {
-    const t = e.target;
-    if (!t) return;
-
-    const metricEl = t.closest?.("#metricSales, #metricTickets, [data-metric]");
-    if (!metricEl) return;
-
-    const id = metricEl.id;
-    const dm = metricEl.getAttribute?.("data-metric");
-
-    if (id === "metricSales" || dm === "Sales") setMetric("Sales", map);
-    if (id === "metricTickets" || dm === "Tickets") setMetric("Tickets", map);
-  }, true);
-}
-
-/*** BOOT ***/
-log("Booting...");
-
-if (!MAPBOX_TOKEN || MAPBOX_TOKEN.includes("PASTE_YOUR_MAPBOX")) {
-  warn("You still need to set MAPBOX_TOKEN at the top of app.js");
-}
-
-mapboxgl.accessToken = MAPBOX_TOKEN;
-
-const map = new mapboxgl.Map({
-  container: "map",
-  style: "mapbox://styles/mapbox/light-v11",
-  center: CONFIG.center,
-  zoom: CONFIG.zoom
-});
-
-map.on("load", async () => {
-  await loadFiltersJson();
-
-  log("Map loaded. Adding layers...");
-
-  const sourceId = "wl-src";
-  if (!map.getSource(sourceId)) {
-    map.addSource(sourceId, {
-      type: "vector",
-      url: `mapbox://${CONFIG.tilesetId}`
-    });
-  }
-
-  if (!map.getLayer("wl-heat")) {
-    map.addLayer(
-      {
-        id: "wl-heat",
-        type: "heatmap",
-        source: sourceId,
-        "source-layer": CONFIG.sourceLayer,
-        maxzoom: CONFIG.heatmapMaxZoom,
-        filter: buildLayerFilter(),
-        paint: {
-          "heatmap-weight": heatWeightExpr(metric),
-          "heatmap-intensity": heatIntensityExpr(),
-          "heatmap-radius": heatRadiusExpr(),
-          "heatmap-color": heatColorExpr(),
-          "heatmap-opacity": ["interpolate", ["linear"], ["zoom"], 0, 0.95, CONFIG.heatmapMaxZoom, 0.55]
-        }
-      },
-      "waterway-label"
-    );
-  }
-
-  if (!map.getLayer("wl-points")) {
-    map.addLayer({
-      id: "wl-points",
-      type: "circle",
-      source: sourceId,
-      "source-layer": CONFIG.sourceLayer,
-      minzoom: CONFIG.pointsMinZoom,
-      filter: buildLayerFilter(),
-      paint: {
-        "circle-radius": circleRadiusExpr(metric),
-        "circle-color": "rgba(0,0,0,0.55)",
-        "circle-stroke-color": "rgba(255,255,255,0.85)",
-        "circle-stroke-width": 1,
-        "circle-opacity": circleOpacityExpr()
-      }
-    });
-  }
-
-  if (applyBtn) applyBtn.addEventListener("click", () => applyFilters(map));
-  if (clearBtn) clearBtn.addEventListener("click", () => clearFilters(map));
-
-  // Enter key applies
-  [startDateInput, endDateInput].forEach((el) => {
-    if (!el) return;
-    el.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") applyFilters(map);
-    });
+  const map = new mapboxgl.Map({
+    container: "map",
+    style: "mapbox://styles/mapbox/light-v11",
+    center: [-96.7, 30.6], // Texas-ish default
+    zoom: 6.3,
   });
 
-  wireMetricControls(map);
+  // Add basic nav controls
+  map.addControl(new mapboxgl.NavigationControl({ visualizePitch: true }), "top-right");
 
-  // initial apply
-  applyFilters(map);
+  // =========================
+  // Load filters.json & populate selects
+  // =========================
+  async function loadFilters() {
+    log("Loading filter lists...");
+    setStatus("Loading filters…");
 
-  log("Ready");
-});
+    try {
+      const res = await fetch(FILTERS_URL, { cache: "no-store" });
+      if (!res.ok) throw new Error(`filters.json HTTP ${res.status}`);
+      const data = await res.json();
+
+      const branches = Array.isArray(data.branches) ? data.branches : [];
+      const groups = Array.isArray(data.groups) ? data.groups : [];
+
+      // Branch select
+      if (els.branchSelect) {
+        // keep first option
+        for (const b of branches) {
+          const opt = document.createElement("option");
+          opt.value = b;
+          opt.textContent = b;
+          els.branchSelect.appendChild(opt);
+        }
+      }
+
+      // Group select
+      if (els.groupSelect) {
+        for (const g of groups) {
+          const opt = document.createElement("option");
+          opt.value = g;
+          opt.textContent = g;
+          els.groupSelect.appendChild(opt);
+        }
+      }
+
+      log(`Loaded filters.json • ${branches.length} branches • ${groups.length} groups`);
+      setStatus(`Loaded ${branches.length} branches • ${groups.length} product groups`);
+    } catch (err) {
+      console.warn(LOG_PREFIX, "filters.json load failed:", err);
+      setStatus("Could not load filters.json (check path). Filters may be incomplete.");
+    }
+  }
+
+  // =========================
+  // Layers
+  // =========================
+  const SOURCE_ID = "wl-zip-sales";
+  const HEAT_LAYER_ID = "wl-heat";
+  const POINT_LAYER_ID = "wl-points";
+
+  function ensureLayers() {
+    if (!map.getSource(SOURCE_ID)) {
+      map.addSource(SOURCE_ID, {
+        type: "vector",
+        url: `mapbox://${TILESET_ID}`,
+      });
+    }
+
+    // Metric expression (numeric)
+    const metricProp = METRICS[state.metric].prop;
+    const metricNum = safeToNumberExpr(metricProp);
+
+    // Heatmap layer
+    if (!map.getLayer(HEAT_LAYER_ID)) {
+      map.addLayer({
+        id: HEAT_LAYER_ID,
+        type: "heatmap",
+        source: SOURCE_ID,
+        "source-layer": SOURCE_LAYER,
+        paint: {
+          // Weight by metric (0..1 scaled)
+          "heatmap-weight": [
+            "interpolate",
+            ["linear"],
+            metricNum,
+            0, 0,
+            500, 0.25,
+            2000, 0.6,
+            10000, 1
+          ],
+
+          // Intensity vs zoom (subtle)
+          "heatmap-intensity": [
+            "interpolate",
+            ["linear"],
+            ["zoom"],
+            0, 0.7,
+            7, 1.0,
+            10, 1.4,
+            12, 1.8
+          ],
+
+          // Radius vs zoom (this controls the “blur” feel)
+          "heatmap-radius": [
+            "interpolate",
+            ["linear"],
+            ["zoom"],
+            0, 10,
+            7, 22,
+            10, 34,
+            12, 48
+          ],
+
+          // Opacity vs zoom
+          "heatmap-opacity": [
+            "interpolate",
+            ["linear"],
+            ["zoom"],
+            6, 0.92,
+            11, 0.78,
+            13, 0.6
+          ],
+        },
+      });
+    }
+
+    // Points layer (optional, helps “anchor” the heatmap)
+    if (!map.getLayer(POINT_LAYER_ID)) {
+      map.addLayer({
+        id: POINT_LAYER_ID,
+        type: "circle",
+        source: SOURCE_ID,
+        "source-layer": SOURCE_LAYER,
+        paint: {
+          "circle-opacity": [
+            "interpolate",
+            ["linear"],
+            ["zoom"],
+            6, 0.08,
+            9, 0.18,
+            12, 0.35
+          ],
+          "circle-radius": [
+            "interpolate",
+            ["linear"],
+            ["zoom"],
+            6, 2,
+            9, 3,
+            12, 5
+          ],
+          // Keep neutral so the heatmap is the star
+          "circle-color": "#111827",
+        },
+      });
+    }
+  }
+
+  function updateMetricPaint() {
+    const metricProp = METRICS[state.metric].prop;
+    const metricNum = safeToNumberExpr(metricProp);
+
+    if (map.getLayer(HEAT_LAYER_ID)) {
+      map.setPaintProperty(HEAT_LAYER_ID, "heatmap-weight", [
+        "interpolate",
+        ["linear"],
+        metricNum,
+        0, 0,
+        500, 0.25,
+        2000, 0.6,
+        10000, 1
+      ]);
+    }
+  }
+
+  // =========================
+  // Apply filters to layers
+  // =========================
+  function applyFilters() {
+    // Read UI -> state
+    state.branch = els.branchSelect?.value ?? "__ALL__";
+    state.group = els.groupSelect?.value ?? "__ALL__";
+
+    state.startKey = dateToKey(els.startDate?.value);
+    state.endKey = dateToKey(els.endDate?.value);
+
+    // Validate date range: swap if user entered backwards
+    if (state.startKey != null && state.endKey != null && state.startKey > state.endKey) {
+      const tmp = state.startKey;
+      state.startKey = state.endKey;
+      state.endKey = tmp;
+
+      // also swap inputs so user sees it
+      const s = els.startDate.value;
+      els.startDate.value = els.endDate.value;
+      els.endDate.value = s;
+    }
+
+    const filterExpr = buildFilterExpr();
+
+    if (map.getLayer(HEAT_LAYER_ID)) map.setFilter(HEAT_LAYER_ID, filterExpr);
+    if (map.getLayer(POINT_LAYER_ID)) map.setFilter(POINT_LAYER_ID, filterExpr);
+
+    setStatus(
+      `Metric: ${METRICS[state.metric].label} • ` +
+      `Branch: ${state.branch === "__ALL__" ? "All" : state.branch} • ` +
+      `Group: ${state.group === "__ALL__" ? "All" : state.group} • ` +
+      `Dates: ${state.startKey ?? "…"} → ${state.endKey ?? "…"}`
+    );
+
+    log("Applied filters • Metric:", METRICS[state.metric].label);
+  }
+
+  function clearFilters() {
+    // Reset UI
+    if (els.branchSelect) els.branchSelect.value = "__ALL__";
+    if (els.groupSelect) els.groupSelect.value = "__ALL__";
+    if (els.startDate) els.startDate.value = "";
+    if (els.endDate) els.endDate.value = "";
+
+    // Reset state
+    state.branch = "__ALL__";
+    state.group = "__ALL__";
+    state.startKey = null;
+    state.endKey = null;
+
+    // Apply reset filter
+    applyFilters();
+    log("Cleared filters");
+  }
+
+  // =========================
+  // Wire up UI events
+  // =========================
+  function wireUI() {
+    els.metricSales?.addEventListener("click", () => {
+      setMetricUI("sales");
+      updateMetricPaint();
+      applyFilters();
+    });
+
+    els.metricTickets?.addEventListener("click", () => {
+      setMetricUI("tickets");
+      updateMetricPaint();
+      applyFilters();
+    });
+
+    els.applyBtn?.addEventListener("click", () => applyFilters());
+    els.clearBtn?.addEventListener("click", () => clearFilters());
+
+    // Nice UX: hitting Enter in date fields applies
+    els.startDate?.addEventListener("keydown", (e) => { if (e.key === "Enter") applyFilters(); });
+    els.endDate?.addEventListener("keydown", (e) => { if (e.key === "Enter") applyFilters(); });
+  }
+
+  // =========================
+  // Startup sequence
+  // =========================
+  (async function init() {
+    await loadFilters();
+    wireUI();
+
+    map.on("load", () => {
+      log("Map loaded. Adding layers...");
+      ensureLayers();
+
+      // default metric
+      setMetricUI("sales");
+      updateMetricPaint();
+
+      // default filters
+      applyFilters();
+
+      log("Ready");
+    });
+  })();
+})();
