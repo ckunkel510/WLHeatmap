@@ -67,6 +67,51 @@
     return (y * 10000) + (mo * 100) + d;
   }
 
+
+// Convert YYYYMMDD int -> Date (local)
+function keyToDate(key) {
+  if (!key) return null;
+  const y = Math.floor(key / 10000);
+  const m = Math.floor((key % 10000) / 100);
+  const d = key % 100;
+  return new Date(y, m - 1, d);
+}
+
+// Format Date -> "M/D/YYYY" (no leading zeros), matching tileset "﻿SaleDate" values
+function formatMDY(dt) {
+  const m = dt.getMonth() + 1;
+  const d = dt.getDate();
+  const y = dt.getFullYear();
+  return `${m}/${d}/${y}`;
+}
+
+// Build an array of "M/D/YYYY" strings between startKey and endKey (inclusive)
+function buildAllowedSaleDates(startKey, endKey) {
+  const sdt = keyToDate(startKey);
+  const edt = keyToDate(endKey);
+  if (!sdt || !edt) return [];
+  // normalize to midnight
+  sdt.setHours(0,0,0,0);
+  edt.setHours(0,0,0,0);
+
+  const dayMs = 24 * 60 * 60 * 1000;
+  const days = Math.round((edt - sdt) / dayMs);
+  if (days < 0) return [];
+  // guard: avoid massive literal arrays in filters
+  if (days > 370) {
+    console.warn("[WLHeatmap] Date range too large for SaleDate string filter:", days, "days. Narrow the range or add SaleDateKey to the layer properties.");
+    return [];
+  }
+
+  const out = [];
+  for (let i = 0; i <= days; i++) {
+    const dt = new Date(sdt.getTime() + i * dayMs);
+    out.push(formatMDY(dt));
+  }
+  return out;
+}
+
+
   function safeToNumberExpr(propName) {
   return ["coalesce", ["to-number", ["get", propName]], 0];
 }
@@ -126,17 +171,29 @@ function tilesetHasSaleDateKey() {
     }
 
 
+
 const dk = saleDateKeyExpr();
 
-// Date filter only works when the tileset includes a numeric `SaleDateKey` property (YYYYMMDD).
-// If it's not present, skip adding date clauses (otherwise Mapbox GL JS v3 may reject the filter).
+// Date filter prefers numeric SaleDateKey when available.
+// If it isn't available via client-side feature properties, fall back to matching the raw "M/D/YYYY" SaleDate strings.
 const canDateFilter = tilesetHasSaleDateKey();
 
 if (canDateFilter) {
   if (state.startKey != null) expr.push([">=", dk, state.startKey]);
   if (state.endKey != null) expr.push(["<=", dk, state.endKey]);
-}
-    return expr;
+} else if (state.startKey != null || state.endKey != null) {
+  // Fallback: build list of allowed dates and filter on the BOM SaleDate field directly.
+  // Works without parsing inside Mapbox expressions (avoids GL JS v3 validation issues).
+  const sKey = state.startKey ?? state.endKey;
+  const eKey = state.endKey ?? state.startKey;
+  const allowed = buildAllowedSaleDates(sKey, eKey);
+
+  if (allowed.length) {
+    expr.push(["in", ["get", BOM_SALEDATE_FIELD], ["literal", allowed]]);
+  } else {
+    console.warn("[WLHeatmap] Date filter skipped — SaleDateKey not visible and allowed date list is empty/too large.");
+  }
+}return expr;
   }
 
   function setMetricUI(metric) {
@@ -355,7 +412,7 @@ try {
 
   // Date filter note (tileset must include numeric `SaleDateKey` to enable date filtering)
   const canDateFilterNow = (state.startKey != null || state.endKey != null) ? tilesetHasSaleDateKey() : true;
-  const dateNote = (canDateFilterNow ? "" : " (SaleDateKey missing in tileset — date filter skipped)");
+  const dateNote = (canDateFilterNow ? "" : " (SaleDateKey not visible — using SaleDate string filter)");
 
 
     setStatus(
