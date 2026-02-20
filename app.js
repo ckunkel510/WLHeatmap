@@ -111,7 +111,6 @@ function tilesetHasSaleDateKey() {
     } catch {
       return false;
     }
-  }
 }
 
 
