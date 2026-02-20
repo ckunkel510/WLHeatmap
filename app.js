@@ -89,23 +89,31 @@
 //
 // If SaleDateKey is missing, the date filter will be skipped (and we’ll surface a status note).
 function saleDateKeyExpr() {
-  return [
-    "coalesce",
-    ["to-number", ["get", "SaleDateKey"]],
-    ["to-number", ["get", "\ufeffSaleDateKey"]], // BOM header variant
-    0
-  ];
-}
+    return [
+      "coalesce",
+      ["to-number", ["get", "SaleDateKey"]],
+      ["to-number", ["get", "\ufeffSaleDateKey"]],
+      0,
+    ];
+  }
 
 function tilesetHasSaleDateKey() {
-  try {
-    const feats = map.queryRenderedFeatures({ layers: [POINT_LAYER_ID] });
-    const p = feats?.[0]?.properties;
-    return !!(p && (p.SaleDateKey != null || p["\ufeffSaleDateKey"] != null));
-  } catch {
-    return false;
+    try {
+      // Prefer querySourceFeatures (sees properties even if not currently rendered)
+      const sfeats = map.querySourceFeatures(SOURCE_ID, { sourceLayer: SOURCE_LAYER });
+      const sp = sfeats?.[0]?.properties;
+      if (sp) return (sp.SaleDateKey != null || sp["\ufeffSaleDateKey"] != null);
+
+      // Fallback: rendered features
+      const feats = map.queryRenderedFeatures({ layers: [POINT_LAYER_ID] });
+      const p = feats?.[0]?.properties;
+      return !!(p && (p.SaleDateKey != null || p["\ufeffSaleDateKey"] != null));
+    } catch {
+      return false;
+    }
   }
 }
+
 
   function buildFilterExpr() {
     const expr = ["all"];
