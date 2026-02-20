@@ -1,8 +1,8 @@
 /* ============================================================
-   WLHeatmap • app.js (FULL FILE • hardened)
+   WLHeatmap • app.js (FULL FILE • Mapbox GL JS v3-safe)
    - Branch + Group + Date range filters
    - Metric toggle Sales/Tickets (click-proof)
-   - Defensive numeric parsing to avoid Mapbox expression errors
+   - Numeric safety using typeof(...) (no is-number)
    ============================================================ */
 
 /*** 1) PUT YOUR TOKEN HERE ***/
@@ -65,17 +65,14 @@ function dateStrToKey(dateStr) {
 }
 
 /* ----------------------------------------------------------------
-   NUMERIC SAFETY FOR MAPBOX EXPRESSIONS
-   Goal: never pass non-number into ln/interpolate/etc.
-   Approach:
-     - to-number(get(field)) can still be “not a number” for some strings.
-     - So we clamp by using a "case" check:
-         if is-number(to-number(get)) then use it else 0
-   Mapbox has "is-number" expression.
+   NUMERIC SAFETY FOR MAPBOX EXPRESSIONS (Mapbox GL JS v3)
+   - Avoid is-number (fails validation in v3)
+   - Use typeof(to-number(...)) == "number"
 ------------------------------------------------------------------ */
 function safeNumberFromField(fieldName) {
-  const n = ["to-number", ["get", fieldName]];
-  return ["case", ["is-number", n], n, 0];
+  const num = ["to-number", ["get", fieldName]];
+  const isNum = ["==", ["typeof", num], "number"];
+  return ["case", isNum, num, 0];
 }
 
 function metricFieldName(metric) {
@@ -250,7 +247,6 @@ function setMetric(newMetric, map) {
 }
 
 function wireMetricControls(map) {
-  // Radios (both change and click)
   if (metricSalesRadio) {
     metricSalesRadio.addEventListener("change", () => metricSalesRadio.checked && setMetric("Sales", map));
     metricSalesRadio.addEventListener("click",  () => metricSalesRadio.checked && setMetric("Sales", map));
@@ -261,19 +257,17 @@ function wireMetricControls(map) {
     metricTicketsRadio.addEventListener("click",  () => metricTicketsRadio.checked && setMetric("Tickets", map));
   }
 
-  // Also bind labels if they exist (helps if the input is tiny)
   const salesLabel = document.querySelector('label[for="metricSales"]');
   const ticketsLabel = document.querySelector('label[for="metricTickets"]');
   if (salesLabel) salesLabel.addEventListener("click", () => setMetric("Sales", map));
   if (ticketsLabel) ticketsLabel.addEventListener("click", () => setMetric("Tickets", map));
 
-  // Optional select fallback
   if (metricSelect) {
     metricSelect.addEventListener("change", () => setMetric(metricSelect.value, map));
   }
 }
 
-/*** BOOT MAP ***/
+/*** BOOT ***/
 log("Booting...");
 
 if (!MAPBOX_TOKEN || MAPBOX_TOKEN.includes("PASTE_YOUR_MAPBOX")) {
@@ -302,7 +296,6 @@ map.on("load", async () => {
     });
   }
 
-  // Heatmap layer
   if (!map.getLayer("wl-heat")) {
     map.addLayer(
       {
@@ -324,7 +317,6 @@ map.on("load", async () => {
     );
   }
 
-  // Points layer
   if (!map.getLayer("wl-points")) {
     map.addLayer({
       id: "wl-points",
@@ -343,11 +335,9 @@ map.on("load", async () => {
     });
   }
 
-  // Buttons
   if (applyBtn) applyBtn.addEventListener("click", () => applyFilters(map));
   if (clearBtn) clearBtn.addEventListener("click", () => clearFilters(map));
 
-  // Enter key applies from date fields
   [startDateInput, endDateInput].forEach((el) => {
     if (!el) return;
     el.addEventListener("keydown", (e) => {
@@ -355,10 +345,8 @@ map.on("load", async () => {
     });
   });
 
-  // Metric controls
   wireMetricControls(map);
 
-  // Initialize metric and apply
   setMetric(metric, map);
 
   log("Ready");
