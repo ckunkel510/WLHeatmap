@@ -77,22 +77,26 @@
  // Build numeric YYYYMMDD from the tileset's M/D/YYYY string in "﻿SaleDate"
 // Example: "2/11/2026" => 20260211
 function saleDateKeyFromBOMExpr() {
+  // Pull the sale date string. Prefer BOM field, fallback to normal.
   const ds = [
     "to-string",
     [
       "coalesce",
-      ["get", BOM_SALEDATE_FIELD], // "\ufeffSaleDate"
+      ["get", BOM_SALEDATE_FIELD],
       ["get", "SaleDate"],
       ""
     ]
   ];
 
-  const parts = ["split", ds, "/"]; // ["2","11","2026"]
+  // "M/D/YYYY" -> ["M","D","YYYY"]
+  const parts = ["split", ds, "/"];
 
-  const y = ["to-number", ["at", 2, parts], 0];
-  const m = ["to-number", ["at", 0, parts], 0];
-  const d = ["to-number", ["at", 1, parts], 0];
+  // Mapbox-safe numeric conversions (avoid to-number "fallback" ambiguity)
+  const y = ["coalesce", ["to-number", ["at", 2, parts]], 0];
+  const m = ["coalesce", ["to-number", ["at", 0, parts]], 0];
+  const d = ["coalesce", ["to-number", ["at", 1, parts]], 0];
 
+  // If it doesn't look like M/D/YYYY, return 0
   return [
     "case",
     [">=", ["length", parts], 3],
@@ -312,9 +316,22 @@ function saleDateKeyFromBOMExpr() {
     }
 
     const filterExpr = buildFilterExpr();
+     // ---- DEBUG ----
+console.log("[WLHeatmap][DEBUG] state:", JSON.stringify(state));
+console.log("[WLHeatmap][DEBUG] filterExpr:", JSON.stringify(filterExpr));
+// --------------
 
-    if (map.getLayer(HEAT_LAYER_ID)) map.setFilter(HEAT_LAYER_ID, filterExpr);
-    if (map.getLayer(POINT_LAYER_ID)) map.setFilter(POINT_LAYER_ID, filterExpr);
+    try {
+  if (map.getLayer(HEAT_LAYER_ID)) map.setFilter(HEAT_LAYER_ID, filterExpr);
+} catch (e) {
+  console.error("[WLHeatmap][DEBUG] setFilter wl-heat failed", e, filterExpr);
+}
+
+try {
+  if (map.getLayer(POINT_LAYER_ID)) map.setFilter(POINT_LAYER_ID, filterExpr);
+} catch (e) {
+  console.error("[WLHeatmap][DEBUG] setFilter wl-points failed", e, filterExpr);
+}
 
     setStatus(
       `Metric: ${METRICS[state.metric].label} • ` +
