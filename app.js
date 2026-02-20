@@ -1,8 +1,9 @@
 /* ============================================================
    WLHeatmap • app.js (FULL FILE • Mapbox GL JS v3-safe)
-   - Branch + Group + Date range filters
-   - Metric toggle Sales/Tickets (click-proof)
-   - Numeric safety using typeof(...) (no is-number)
+   Fixes:
+   - Date parsing supports YYYY-MM-DD AND M/D/YYYY
+   - Numeric expressions use to-number(value, default) (no NaN errors)
+   - Metric toggle Sales/Tickets is click-proof (event delegation)
    ============================================================ */
 
 /*** 1) PUT YOUR TOKEN HERE ***/
@@ -11,7 +12,7 @@ const MAPBOX_TOKEN = "pk.eyJ1IjoiY2t1bmtlbCIsImEiOiJjbWx1Yjc4ODIwOW51M2Zwdm15dHF
 /*** 2) CONFIG ***/
 const CONFIG = {
   tilesetId: "ckunkel.bp872kqi",
-  sourceLayer: "MapBox-42vjbp",         // must match tileset layer name exactly
+  sourceLayer: "MapBox-42vjbp", // must match tileset layer name exactly
   filtersUrl: "./filters.json",
   center: [-96.3698, 30.6744],
   zoom: 6.3,
@@ -25,9 +26,8 @@ const warn = (...args) => console.warn("[WLHeatmap]", ...args);
 function $(id) { return document.getElementById(id); }
 
 function uniqSorted(arr) {
-  return Array.from(new Set((arr || []).filter(Boolean))).sort((a, b) =>
-    String(a).localeCompare(String(b))
-  );
+  return Array.from(new Set((arr || []).filter(v => v !== null && v !== undefined && String(v).trim() !== "")))
+    .sort((a, b) => String(a).localeCompare(String(b)));
 }
 
 function setStatus(text) {
@@ -52,78 +52,89 @@ function fillSelect(selectEl, values, placeholder) {
   });
 }
 
-// input[type="date"] => YYYY-MM-DD -> int yyyymmdd
+/* ------------------------------------------------------------
+   Date parsing:
+   - supports "YYYY-MM-DD" (date input)
+   - supports "M/D/YYYY" or "MM/DD/YYYY" (typed / text input)
+   returns int yyyymmdd or null
+------------------------------------------------------------- */
 function dateStrToKey(dateStr) {
   if (!dateStr || typeof dateStr !== "string") return null;
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateStr.trim());
-  if (!m) return null;
-  const y = Number(m[1]);
-  const mo = Number(m[2]);
-  const d = Number(m[3]);
-  if (!y || mo < 1 || mo > 12 || d < 1 || d > 31) return null;
-  return y * 10000 + mo * 100 + d;
+  const s = dateStr.trim();
+
+  // YYYY-MM-DD
+  let m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+  if (m) {
+    const y = Number(m[1]), mo = Number(m[2]), d = Number(m[3]);
+    if (y && mo >= 1 && mo <= 12 && d >= 1 && d <= 31) return y * 10000 + mo * 100 + d;
+    return null;
+  }
+
+  // M/D/YYYY or MM/DD/YYYY
+  m = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(s);
+  if (m) {
+    const mo = Number(m[1]), d = Number(m[2]), y = Number(m[3]);
+    if (y && mo >= 1 && mo <= 12 && d >= 1 && d <= 31) return y * 10000 + mo * 100 + d;
+    return null;
+  }
+
+  return null;
 }
 
 /* ----------------------------------------------------------------
-   NUMERIC SAFETY FOR MAPBOX EXPRESSIONS (Mapbox GL JS v3)
-   - Avoid is-number (fails validation in v3)
-   - Use typeof(to-number(...)) == "number"
+   Numeric safety for Mapbox expressions:
+   - use to-number(value, default) so blank/strings never become NaN
 ------------------------------------------------------------------ */
-function safeNumberFromField(fieldName) {
-  const num = ["to-number", ["get", fieldName]];
-  const isNum = ["==", ["typeof", num], "number"];
-  return ["case", isNum, num, 0];
+function numField(fieldName, fallback = 0) {
+  return ["to-number", ["get", fieldName], fallback];
 }
 
 function metricFieldName(metric) {
   return metric === "Tickets" ? "TicketCount" : "TotalSales";
 }
-
 function metricLabel(metric) {
   return metric === "Tickets" ? "Tickets" : "Sales";
 }
 
+/*** Heatmap paint ***/
 function heatWeightExpr(metric) {
-  // ln(1 + safeValue)
-  return ["ln", ["+", 1, safeNumberFromField(metricFieldName(metric))]];
+  // ln(1 + value)
+  return ["ln", ["+", 1, numField(metricFieldName(metric), 0)]];
 }
-
 function heatIntensityExpr() {
   return ["interpolate", ["linear"], ["zoom"], 0, 0.6, 7, 1.2, 10, 2.0, 12, 3.0];
 }
-
 function heatRadiusExpr() {
   return ["interpolate", ["linear"], ["zoom"], 4, 12, 7, 20, 10, 34, 12, 48];
 }
-
 function heatColorExpr() {
   return [
     "interpolate",
     ["linear"],
     ["heatmap-density"],
     0, "rgba(0,0,0,0)",
-    0.10, "rgba(0, 145, 255, 0.25)",
-    0.25, "rgba(0, 145, 255, 0.55)",
-    0.45, "rgba(0, 200, 120, 0.65)",
-    0.65, "rgba(255, 220, 0, 0.75)",
-    0.85, "rgba(255, 120, 0, 0.85)",
-    1.00, "rgba(255, 0, 0, 0.95)"
+    0.10, "rgba(0,145,255,0.25)",
+    0.25, "rgba(0,145,255,0.55)",
+    0.45, "rgba(0,200,120,0.65)",
+    0.65, "rgba(255,220,0,0.75)",
+    0.85, "rgba(255,120,0,0.85)",
+    1.00, "rgba(255,0,0,0.95)"
   ];
 }
 
+/*** Points paint ***/
 function circleRadiusExpr(metric) {
   // interpolate(linear, ln(1+value), ...)
   return [
     "interpolate",
     ["linear"],
-    ["ln", ["+", 1, safeNumberFromField(metricFieldName(metric))]],
+    ["ln", ["+", 1, numField(metricFieldName(metric), 0)]],
     0, 2,
     3, 4,
     6, 7,
     9, 11
   ];
 }
-
 function circleOpacityExpr() {
   return ["interpolate", ["linear"], ["zoom"], CONFIG.pointsMinZoom, 0.0, CONFIG.pointsMinZoom + 0.75, 0.9];
 }
@@ -170,7 +181,6 @@ async function loadFiltersJson() {
     log(`Loaded filters.json • ${branches.length} branches • ${groups.length} groups`);
   } catch (e) {
     warn("Failed to load filters.json:", e);
-    log("Continuing without filters.json (dropdowns may be empty).");
   }
 }
 
@@ -187,11 +197,11 @@ function buildLayerFilter() {
   if (branch) filters.push(["==", ["get", "BranchName"], branch]);
   if (group) filters.push(["==", ["get", "ProductGroupLevel1"], group]);
 
-  // SaleDateKey numeric filter
-  const saleDateKeyExpr = safeNumberFromField("SaleDateKey");
+  // SaleDateKey numeric filter (works whether SaleDateKey is stored as string or number)
+  const saleKey = numField("SaleDateKey", 0);
 
-  if (startKey != null) filters.push([">=", saleDateKeyExpr, startKey]);
-  if (endKey != null) filters.push(["<=", saleDateKeyExpr, endKey]);
+  if (startKey != null) filters.push([">=", saleKey, startKey]);
+  if (endKey != null) filters.push(["<=", saleKey, endKey]);
 
   return filters;
 }
@@ -215,7 +225,7 @@ function applyFilters(map) {
     map.setPaintProperty("wl-points", "circle-opacity", circleOpacityExpr());
   }
 
-  log(`Applied filters • Metric: ${metricLabel(metric)}`);
+  log(`Applied filters • Metric: ${metricLabel(metric)} • StartKey=${dateStrToKey(startDateInput?.value || "")} • EndKey=${dateStrToKey(endDateInput?.value || "")}`);
   setStatus(`Metric: ${metricLabel(metric)}`);
 }
 
@@ -226,15 +236,11 @@ function clearFilters(map) {
   if (startDateInput) startDateInput.value = "";
   if (endDateInput) endDateInput.value = "";
 
-  metric = "Sales";
-  if (metricSalesRadio) metricSalesRadio.checked = true;
-  if (metricTicketsRadio) metricTicketsRadio.checked = false;
-  if (metricSelect) metricSelect.value = metric;
-
+  setMetric("Sales", map);
   applyFilters(map);
 }
 
-/*** METRIC WIRING (click-proof) ***/
+/*** METRIC (click-proof) ***/
 function setMetric(newMetric, map) {
   metric = newMetric === "Tickets" ? "Tickets" : "Sales";
 
@@ -247,24 +253,35 @@ function setMetric(newMetric, map) {
 }
 
 function wireMetricControls(map) {
+  // Normal wiring (change/click)
   if (metricSalesRadio) {
     metricSalesRadio.addEventListener("change", () => metricSalesRadio.checked && setMetric("Sales", map));
-    metricSalesRadio.addEventListener("click",  () => metricSalesRadio.checked && setMetric("Sales", map));
+    metricSalesRadio.addEventListener("click", () => setMetric("Sales", map));
   }
-
   if (metricTicketsRadio) {
     metricTicketsRadio.addEventListener("change", () => metricTicketsRadio.checked && setMetric("Tickets", map));
-    metricTicketsRadio.addEventListener("click",  () => metricTicketsRadio.checked && setMetric("Tickets", map));
+    metricTicketsRadio.addEventListener("click", () => setMetric("Tickets", map));
   }
-
-  const salesLabel = document.querySelector('label[for="metricSales"]');
-  const ticketsLabel = document.querySelector('label[for="metricTickets"]');
-  if (salesLabel) salesLabel.addEventListener("click", () => setMetric("Sales", map));
-  if (ticketsLabel) ticketsLabel.addEventListener("click", () => setMetric("Tickets", map));
-
   if (metricSelect) {
     metricSelect.addEventListener("change", () => setMetric(metricSelect.value, map));
   }
+
+  // Event delegation fallback:
+  // If labels/containers are being clicked but radios don't receive click (overlay/label mismatch),
+  // this still toggles based on "metricSales"/"metricTickets" IDs or data-metric attributes.
+  document.addEventListener("click", (e) => {
+    const t = e.target;
+    if (!t) return;
+
+    const metricEl = t.closest?.("#metricSales, #metricTickets, [data-metric]");
+    if (!metricEl) return;
+
+    const id = metricEl.id;
+    const dm = metricEl.getAttribute?.("data-metric");
+
+    if (id === "metricSales" || dm === "Sales") setMetric("Sales", map);
+    if (id === "metricTickets" || dm === "Tickets") setMetric("Tickets", map);
+  }, true);
 }
 
 /*** BOOT ***/
@@ -338,6 +355,7 @@ map.on("load", async () => {
   if (applyBtn) applyBtn.addEventListener("click", () => applyFilters(map));
   if (clearBtn) clearBtn.addEventListener("click", () => clearFilters(map));
 
+  // Enter key applies
   [startDateInput, endDateInput].forEach((el) => {
     if (!el) return;
     el.addEventListener("keydown", (e) => {
@@ -347,7 +365,8 @@ map.on("load", async () => {
 
   wireMetricControls(map);
 
-  setMetric(metric, map);
+  // initial apply
+  applyFilters(map);
 
   log("Ready");
 });
