@@ -1,6 +1,7 @@
 /* app.js — Woodson Zip Sales Heatmap (Mapbox GL JS v3)
-   - Filters: BranchName, ProductGroupLevel1, SaleDateKey range
+   - Filters: BranchName, ProductGroupLevel1, date range (from BOM SaleDate)
    - Metric toggle: TotalSales vs TicketCount
+   - Heatmap appearance: unchanged
 */
 
 (() => {
@@ -8,11 +9,14 @@
   const log = (...args) => console.log(LOG_PREFIX, ...args);
 
   // =========================
-  // EDIT THESE
+  // EDIT THESE IF NEEDED
   // =========================
   const TILESET_ID = "ckunkel.bp872kqi";
   const SOURCE_LAYER = "MapBox-42vjbp";
   const FILTERS_URL = "filters.json";
+
+  // BOM field name we saw in your tileset properties: "﻿SaleDate"
+  const BOM_SALEDATE_FIELD = "\ufeffSaleDate";
 
   // =========================
   // DOM
@@ -37,7 +41,7 @@
   // State
   // =========================
   const state = {
-    metric: "sales",
+    metric: "sales", // "sales" | "tickets"
     branch: "__ALL__",
     group: "__ALL__",
     startKey: null, // YYYYMMDD int
@@ -53,6 +57,7 @@
   // Helpers
   // =========================
   function dateToKey(yyyy_mm_dd) {
+    // input from <input type="date"> is "YYYY-MM-DD"
     if (!yyyy_mm_dd) return null;
     const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(yyyy_mm_dd);
     if (!m) return null;
@@ -63,65 +68,35 @@
   }
 
   function safeToNumberExpr(propName) {
+    // Forces numeric conversion even if Mapbox typed the column as string
     return ["to-number", ["get", propName], 0];
   }
 
-  // ✅ DATE KEY: try multiple property name variants (case-sensitive)
-  function saleDateKeyExpr() {
-    // Try common variants first
-    const candidates = [
-      "SaleDateKey",
-      "SaleDatekey",
-      "saleDateKey",
-      "saledatekey",
-      "SaleDateKEY",
-      "SaleDate_Key",
-      "SaleDateKey ",
-    ];
-
-    // coalesce(to-number(get(candidate)), ..., 0)
-    const parts = candidates.map((k) => ["to-number", ["get", k], null]);
-
-    // If ALL fail, try parsing SaleDateISO like "1/2/2026" or "2026-01-02"
-    // - If it's YYYY-MM-DD => build YYYYMMDD
-    // - If it's M/D/YYYY => build YYYYMMDD
-    const iso = ["to-string", ["coalesce", ["get", "SaleDateISO"], ""]];
-
-    const yyyy_mm_dd = [
-      "match",
-      iso,
-      // if matches "YYYY-MM-DD"
-      ["^\\d{4}-\\d{2}-\\d{2}$"],
+  // Build numeric YYYYMMDD from the tileset's M/D/YYYY string in "﻿SaleDate"
+  // Example: "2/11/2026" => 20260211
+  function saleDateKeyFromBOMExpr() {
+    const ds = [
+      "to-string",
       [
-        "+",
-        ["*", ["to-number", ["slice", iso, 0, 4], 0], 10000],
-        ["*", ["to-number", ["slice", iso, 5, 7], 0], 100],
-        ["to-number", ["slice", iso, 8, 10], 0],
-      ],
-      // else 0 (we’ll try M/D/YYYY below)
-      0
+        "coalesce",
+        ["get", BOM_SALEDATE_FIELD], // the actual one you have
+        ["get", "SaleDate"],         // just in case
+        ""
+      ]
     ];
 
-    // M/D/YYYY (or MM/DD/YYYY) parser
-    // Split by "/" => [M, D, YYYY]
-    const partsMDY = ["split", iso, "/"];
-    const mdyKey = [
-      "case",
-      [">=", ["length", partsMDY], 3],
-      [
-        "+",
-        ["*", ["to-number", ["at", partsMDY, 2], 0], 10000],
-        ["*", ["to-number", ["at", partsMDY, 0], 0], 100],
-        ["to-number", ["at", partsMDY, 1], 0],
-      ],
-      0
-    ];
+    const parts = ["split", ds, "/"]; // ["2","11","2026"]
 
+    // y = parts[2], m = parts[0], d = parts[1]
+    const y = ["to-number", ["at", parts, 2], 0];
+    const m = ["to-number", ["at", parts, 0], 0];
+    const d = ["to-number", ["at", parts, 1], 0];
+
+    // If we don't have at least 3 parts, return 0
     return [
-      "coalesce",
-      ...parts,
-      // If SaleDateKey variants not found, try YYYY-MM-DD parse, then M/D/YYYY parse
-      ["case", [">", yyyy_mm_dd, 0], yyyy_mm_dd, mdyKey],
+      "case",
+      [">=", ["length", parts], 3],
+      ["+", ["*", y, 10000], ["*", m, 100], d],
       0
     ];
   }
@@ -137,14 +112,10 @@
       expr.push(["==", ["get", "ProductGroupLevel1"], state.group]);
     }
 
-    const dk = saleDateKeyExpr();
+    const dk = saleDateKeyFromBOMExpr();
 
-    if (state.startKey != null) {
-      expr.push([">=", dk, state.startKey]);
-    }
-    if (state.endKey != null) {
-      expr.push(["<=", dk, state.endKey]);
-    }
+    if (state.startKey != null) expr.push([">=", dk, state.startKey]);
+    if (state.endKey != null) expr.push(["<=", dk, state.endKey]);
 
     return expr;
   }
@@ -171,8 +142,7 @@
 
   map.addControl(new mapboxgl.NavigationControl({ visualizePitch: true }), "top-right");
 
-  // Expose a tiny debug helper (run in console):
-  // WLdbg() -> prints the first rendered feature properties (if any)
+  // Debug helper
   window.WLdbg = () => {
     try {
       const feats = map.queryRenderedFeatures({ layers: ["wl-points"] });
@@ -226,7 +196,7 @@
   }
 
   // =========================
-  // Layers
+  // Layers (appearance unchanged)
   // =========================
   const SOURCE_ID = "wl-zip-sales";
   const HEAT_LAYER_ID = "wl-heat";
@@ -243,7 +213,6 @@
     const metricProp = METRICS[state.metric].prop;
     const metricNum = safeToNumberExpr(metricProp);
 
-    // ✅ HEATMAP LOOK — unchanged from your current working look
     if (!map.getLayer(HEAT_LAYER_ID)) {
       map.addLayer({
         id: HEAT_LAYER_ID,
