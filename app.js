@@ -501,6 +501,86 @@ try {
 
     els.startDate?.addEventListener("keydown", (e) => { if (e.key === "Enter") applyFilters(); });
     els.endDate?.addEventListener("keydown", (e) => { if (e.key === "Enter") applyFilters(); });
+
+    // =========================
+    // Quick date presets (no HTML edits required)
+    // =========================
+    function pad2(n){ return String(n).padStart(2,"0"); }
+    function toInputDate(d){
+      return `${d.getFullYear()}-${pad2(d.getMonth()+1)}-${pad2(d.getDate())}`;
+    }
+    function startOfMonth(d){ return new Date(d.getFullYear(), d.getMonth(), 1); }
+    function endOfMonth(d){ return new Date(d.getFullYear(), d.getMonth()+1, 0); }
+
+    function setDateInputs(startDt, endDt, { apply = true } = {}) {
+      if (!els.startDate || !els.endDate) return;
+      els.startDate.value = startDt ? toInputDate(startDt) : "";
+      els.endDate.value = endDt ? toInputDate(endDt) : "";
+      if (apply) applyFilters();
+    }
+
+    function ensureQuickDateBar(){
+      if (!els.startDate || !els.endDate) return;
+
+      // avoid duplicates if BisTrack re-inits
+      if (document.getElementById("wlQuickDates")) return;
+
+      const bar = document.createElement("div");
+      bar.id = "wlQuickDates";
+      bar.style.display = "flex";
+      bar.style.flexWrap = "wrap";
+      bar.style.gap = "8px";
+      bar.style.marginTop = "8px";
+
+      const mkBtn = (label, onClick) => {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.textContent = label;
+        b.style.padding = "6px 10px";
+        b.style.border = "1px solid rgba(0,0,0,.15)";
+        b.style.borderRadius = "8px";
+        b.style.background = "#fff";
+        b.style.cursor = "pointer";
+        b.addEventListener("click", onClick);
+        return b;
+      };
+
+      bar.appendChild(mkBtn("Current Year", () => {
+        const y = new Date().getFullYear();
+        setDateInputs(new Date(y, 0, 1), new Date(y, 11, 31));
+      }));
+
+      bar.appendChild(mkBtn("Last Year", () => {
+        const y = new Date().getFullYear() - 1;
+        setDateInputs(new Date(y, 0, 1), new Date(y, 11, 31));
+      }));
+
+      bar.appendChild(mkBtn("Current Month", () => {
+        const d = new Date();
+        setDateInputs(startOfMonth(d), endOfMonth(d));
+      }));
+
+      bar.appendChild(mkBtn("Previous Month", () => {
+        const d = new Date();
+        const prev = new Date(d.getFullYear(), d.getMonth() - 1, 1);
+        setDateInputs(startOfMonth(prev), endOfMonth(prev));
+      }));
+
+      bar.appendChild(mkBtn("YTD", () => {
+        const d = new Date();
+        setDateInputs(new Date(d.getFullYear(), 0, 1), d);
+      }));
+
+      bar.appendChild(mkBtn("Clear Dates", () => {
+        setDateInputs(null, null);
+      }));
+
+      // Insert right after the end date input (best “no HTML edits” anchor)
+      els.endDate.parentElement?.appendChild(bar);
+    }
+
+    // build the bar once when wiring UI
+    ensureQuickDateBar();
   }
 
   // =========================
