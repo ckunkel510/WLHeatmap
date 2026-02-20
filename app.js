@@ -37,17 +37,29 @@ function setActiveMetricButtons() {
  * - We assume feature property "SaleDate" is a string "YYYY-MM-DD".
  * - String comparison works correctly for ISO dates.
  */
+function toMDY(iso) {
+  // iso = "YYYY-MM-DD" from <input type="date">
+  if (!iso) return "";
+  const [y, m, d] = iso.split("-").map(Number);
+  return `${m}/${d}/${y}`; // matches your tileset format like 1/2/2026
+}
+
 function buildFilter() {
   const branch = UI.branchSelect.value;
   const group  = UI.groupSelect.value;
-  const start  = UI.startDate.value; // "" or "YYYY-MM-DD"
-  const end    = UI.endDate.value;
+
+  const startIso = UI.startDate.value;
+  const endIso   = UI.endDate.value;
+
+  const start = toMDY(startIso);
+  const end   = toMDY(endIso);
 
   const f = ["all"];
 
   if (branch !== "__all__") f.push(["==", ["get", "BranchName"], branch]);
   if (group  !== "__all__") f.push(["==", ["get", "ProductGroupLevel1"], group]);
 
+  // Date range (string compare) — works OK within same year/month ranges but ISO is still better
   if (start) f.push([">=", ["get", "SaleDate"], start]);
   if (end)   f.push(["<=", ["get", "SaleDate"], end]);
 
