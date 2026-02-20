@@ -1,86 +1,139 @@
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <title>Zip Heatmap (Tickets / Sales)</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+USE [btprod];
+GO
+SET ANSI_NULLS ON;
+GO
+SET QUOTED_IDENTIFIER ON;
+GO
 
-  <link href="https://api.mapbox.com/mapbox-gl-js/v3.6.0/mapbox-gl.css" rel="stylesheet" />
-  <style>
-    body { margin: 0; padding: 0; font-family: Arial, sans-serif; }
-    #map { position: absolute; top: 0; bottom: 0; width: 100%; }
+/* =========================
+   cwk_RefreshZipSalesDaily
+   - Deletes the target date window first (prevents stale/duplicate keys)
+   - Rebuilds aggregates for the window
+   - Uses COUNT(DISTINCT DocumentID) so TicketCount is true “ticket” count (not line count)
+   ========================= */
+ALTER PROCEDURE [dbo].[cwk_RefreshZipSalesDaily]
+    @StartDate date = NULL,          -- NULL = from earliest available
+    @EndDate   date = NULL,          -- NULL = today
+    @RecalcDaysBack int = 7          -- rolling window for late changes
+AS
+BEGIN
+    SET NOCOUNT ON;
 
-    .controls {
-      position: absolute;
-      top: 12px;
-      left: 12px;
-      z-index: 2;
-      background: #fff;
-      border-radius: 10px;
-      padding: 10px 12px;
-      box-shadow: 0 2px 12px rgba(0,0,0,.18);
-      display: grid;
-      gap: 8px;
-      min-width: 220px;
-    }
+    DECLARE @Today date = CONVERT(date, GETDATE());
 
-    .row {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 8px;
-    }
+    IF @EndDate IS NULL
+        SET @EndDate = @Today;
 
-    button {
-      border: 1px solid #ddd;
-      background: #f7f7f7;
-      padding: 8px 10px;
-      border-radius: 8px;
-      cursor: pointer;
-      font-weight: 600;
-    }
-    button.active {
-      background: #111;
-      color: #fff;
-      border-color: #111;
-    }
+    IF @StartDate IS NULL
+    BEGIN
+        -- First run: full history
+        SELECT @StartDate = MIN(CONVERT(date, DocumentDate))
+        FROM dbo.SalesAnalysis3;
+    END
+    ELSE
+    BEGIN
+        -- Normal run: back up a few days to catch late posting/edits
+        SET @StartDate = DATEADD(day, -@RecalcDaysBack, @StartDate);
+    END
 
-    select {
-      width: 100%;
-      padding: 8px 10px;
-      border-radius: 8px;
-      border: 1px solid #ddd;
-      background: #fff;
-    }
+    /* ==========================================================
+       1) DELETE the target window first to prevent stale/duplicate rows
+          (anything in this window will be rebuilt from scratch)
+       ========================================================== */
+    DELETE FROM dbo.cwk_ZipSalesDaily
+    WHERE SaleDate >= @StartDate
+      AND SaleDate <  DATEADD(day, 1, @EndDate);
 
-    .hint {
-      font-size: 12px;
-      color: #444;
-      line-height: 1.25;
-    }
-  </style>
-</head>
-<body>
-  <div id="map"></div>
+    /* ==========================================================
+       2) Rebuild aggregates for the window
+       ========================================================== */
+    ;WITH Agg AS (
+        SELECT
+            CONVERT(date, sa3.DocumentDate) AS SaleDate,
+            sa3.BranchID,
+            b.Name AS BranchName,
+            z.Zip5 AS PostCode,
+            pg.Level1 AS ProductGroupLevel1,
 
-  <div class="controls">
-    <div class="row">
-      <button id="btnTickets" class="active">Tickets</button>
-      <button id="btnSales">Sales</button>
-    </div>
+            COUNT(DISTINCT sa3.DocumentID) AS TicketCount,
+            SUM(sa3.TotalSales) AS TotalSales,
+            SUM(sa3.TotalSales - sa3.TotalCost) AS TotalProfit,
+            CAST(SUM(sa3.TotalSales) AS decimal(18,2)) / NULLIF(COUNT(DISTINCT sa3.DocumentID), 0) AS AvgTicket,
+            SUM(CASE WHEN z.UsedBranchFallback = 1 THEN 1 ELSE 0 END) AS FallbackToBranchCount
+        FROM dbo.SalesAnalysis3 sa3
+        INNER JOIN dbo.CustomerAddress ca
+            ON ca.CustomerAddressID = sa3.CustomerAddressID
+        LEFT JOIN dbo.Branch b
+            ON b.BranchID = sa3.BranchID
+        LEFT JOIN dbo.jrhProductGroup pg
+            ON pg.ProductID = sa3.ProductID
 
-    <div>
-      <select id="branchSelect">
-        <option value="">All branches</option>
-      </select>
-    </div>
+        OUTER APPLY (
+            SELECT
+                caTrim = NULLIF(LTRIM(RTRIM(ca.PostCode)), ''),
+                bTrim  = NULLIF(LTRIM(RTRIM(b.PostCode)), '')
+        ) t
 
-    <div class="hint">
-      Click a hotspot to see ZIP + metrics.<br/>
-      If nothing shows, verify <b>source-layer</b> name matches your tileset.
-    </div>
-  </div>
+        OUTER APPLY (
+            SELECT
+                caZip5 =
+                    CASE
+                        WHEN LEFT(t.caTrim, 5) LIKE '[0-9][0-9][0-9][0-9][0-9]'
+                            THEN LEFT(t.caTrim, 5)
+                    END,
+                bZip5 =
+                    CASE
+                        WHEN LEFT(t.bTrim, 5) LIKE '[0-9][0-9][0-9][0-9][0-9]'
+                            THEN LEFT(t.bTrim, 5)
+                    END
+        ) z1
 
-  <script src="https://api.mapbox.com/mapbox-gl-js/v3.6.0/mapbox-gl.js"></script>
-  <script src="./app.js"></script>
-</body>
-</html>
+        OUTER APPLY (
+            SELECT
+                Zip5 = COALESCE(z1.caZip5, z1.bZip5),
+                UsedBranchFallback = CASE WHEN z1.caZip5 IS NULL AND z1.bZip5 IS NOT NULL THEN 1 ELSE 0 END
+        ) z
+
+        WHERE
+            sa3.DocumentDate >= @StartDate
+            AND sa3.DocumentDate < DATEADD(day, 1, @EndDate)
+            AND sa3.BranchID IS NOT NULL
+            AND z.Zip5 IS NOT NULL
+            AND pg.Level1 IS NOT NULL   -- keep rows clean; remove if you want Unknown bucket
+
+        GROUP BY
+            CONVERT(date, sa3.DocumentDate),
+            sa3.BranchID,
+            b.Name,
+            z.Zip5,
+            pg.Level1
+    )
+    INSERT INTO dbo.cwk_ZipSalesDaily (
+        SaleDate,
+        BranchID,
+        BranchName,
+        PostCode,
+        ProductGroupLevel1,
+        TicketCount,
+        TotalSales,
+        TotalProfit,
+        AvgTicket,
+        FallbackToBranchCount,
+        LastUpdatedUtc
+    )
+    SELECT
+        a.SaleDate,
+        a.BranchID,
+        a.BranchName,
+        a.PostCode,
+        a.ProductGroupLevel1,
+        a.TicketCount,
+        a.TotalSales,
+        a.TotalProfit,
+        a.AvgTicket,
+        a.FallbackToBranchCount,
+        SYSUTCDATETIME()
+    FROM Agg a;
+
+END;
+GO
