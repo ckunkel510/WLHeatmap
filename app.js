@@ -75,28 +75,33 @@
   // Example: "2/11/2026" => 20260211
  // Build numeric YYYYMMDD from the tileset's M/D/YYYY string in "﻿SaleDate"
 // Example: "2/11/2026" => 20260211
-function saleDateKeyFromBOMExpr() {
-  // Get the raw date string (M/D/YYYY). Use BOM field first, then non-BOM, then "".
-  const raw = [
-    "coalesce",
-    ["get", BOM_SALEDATE_FIELD], // "\ufeffSaleDate"
-    ["get", "SaleDate"],
-    ["literal", ""]
-  ];
 
-  // Ensure it's a string
-  const ds = ["to-string", raw];
-
-  // Split on "/" — wrap "/" as a literal to satisfy validator
-  const parts = ["split", ds, ["literal", "/"]];
-
-  // Pull y/m/d, coalesce to 0 if missing
-  const y = ["coalesce", ["to-number", ["at", 2, parts]], 0];
-  const m = ["coalesce", ["to-number", ["at", 0, parts]], 0];
-  const d = ["coalesce", ["to-number", ["at", 1, parts]], 0];
-
-  return ["+", ["*", y, 10000], ["*", m, 100], d];
+// =========================
+// Date filtering
+// =========================
+// IMPORTANT:
+// Mapbox GL JS v3 style validation is rejecting string-parsing expressions (split/at/etc.)
+// inside filters in your environment. The robust fix is to filter on a precomputed numeric
+// field in the tileset called `SaleDateKey` (YYYYMMDD as a NUMBER).
+//
+// Example property per feature:
+//   SaleDateKey: 20260219
+//
+// If SaleDateKey is missing, the date filter will be skipped (and we’ll surface a status note).
+function saleDateKeyExpr() {
+  return ["coalesce", ["to-number", ["get", "SaleDateKey"]], 0];
 }
+
+function tilesetHasSaleDateKey() {
+  try {
+    const feats = map.queryRenderedFeatures({ layers: [POINT_LAYER_ID] });
+    const p = feats?.[0]?.properties;
+    return !!(p && (p.SaleDateKey != null || p["SaleDateKey"] != null));
+  } catch {
+    return false;
+  }
+}
+
 
   function buildFilterExpr() {
     const expr = ["all"];
@@ -109,11 +114,17 @@ function saleDateKeyFromBOMExpr() {
       expr.push(["==", ["get", "ProductGroupLevel1"], state.group]);
     }
 
-    const dk = saleDateKeyFromBOMExpr();
 
-    if (state.startKey != null) expr.push([">=", dk, state.startKey]);
-    if (state.endKey != null) expr.push(["<=", dk, state.endKey]);
+const dk = saleDateKeyExpr();
 
+// Date filter only works when the tileset includes a numeric `SaleDateKey` property (YYYYMMDD).
+// If it's not present, skip adding date clauses (otherwise Mapbox GL JS v3 may reject the filter).
+const canDateFilter = tilesetHasSaleDateKey();
+
+if (canDateFilter) {
+  if (state.startKey != null) expr.push([">=", dk, state.startKey]);
+  if (state.endKey != null) expr.push(["<=", dk, state.endKey]);
+}
     return expr;
   }
 
@@ -143,7 +154,12 @@ function saleDateKeyFromBOMExpr() {
   window.WLdbg = () => {
     try {
       const feats = map.queryRenderedFeatures({ layers: ["wl-points"] });
-      console.log("[WLHeatmap] sample feature properties:", feats?.[0]?.properties);
+      const p = feats?.[0]?.properties;
+      console.log("[WLHeatmap] sample feature properties:", p);
+      if (p) {
+        console.log("[WLHeatmap] keys:", Object.keys(p).sort());
+        console.log("[WLHeatmap] SaleDateKey:", p.SaleDateKey, "SaleDate:", p.SaleDate, "BOM SaleDate:", p["\ufeffSaleDate"]); 
+      }
       return feats?.[0]?.properties;
     } catch (e) {
       console.warn("[WLHeatmap] WLdbg error:", e);
@@ -330,7 +346,7 @@ try {
       `Metric: ${METRICS[state.metric].label} • ` +
       `Branch: ${state.branch === "__ALL__" ? "All" : state.branch} • ` +
       `Group: ${state.group === "__ALL__" ? "All" : state.group} • ` +
-      `Dates: ${state.startKey ?? "…"} → ${state.endKey ?? "…"}`
+      `Dates: ${state.startKey ?? "…"} → ${state.endKey ?? "…"}${dateNote}`
     );
 
     log("Applied filters • Metric:", METRICS[state.metric].label);
