@@ -81,20 +81,18 @@ function saleDateKeyFromBOMExpr() {
     "to-string",
     [
       "coalesce",
-      ["get", BOM_SALEDATE_FIELD], // the actual one you have
-      ["get", "SaleDate"],         // just in case
+      ["get", BOM_SALEDATE_FIELD], // "\ufeffSaleDate"
+      ["get", "SaleDate"],
       ""
     ]
   ];
 
   const parts = ["split", ds, "/"]; // ["2","11","2026"]
 
-  // y = parts[2], m = parts[0], d = parts[1]
   const y = ["to-number", ["at", 2, parts], 0];
   const m = ["to-number", ["at", 0, parts], 0];
   const d = ["to-number", ["at", 1, parts], 0];
 
-  // If we don't have at least 3 parts, return 0
   return [
     "case",
     [">=", ["length", parts], 3],
