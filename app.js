@@ -1,108 +1,78 @@
-/* =========================================================
-   Woodson Zip Sales Heatmap (Mapbox GL JS)
-   - Filters: Branch, Product Group, Date Range
-   - Metric toggle: Sales vs Tickets
-   - Reads filters.json for dropdown lists
-   - Uses vector tileset for points + heatmap layers
-   ========================================================= */
+/* ============================================================
+   WLHeatmap • app.js (FULL FILE)
+   - BranchName + ProductGroupLevel1 filters
+   - Date range filter (uses SaleDateKey = yyyymmdd)
+   - Metric toggle (Sales vs Tickets)
+   - Apply / Clear fixed
+   - Removes unsupported Mapbox expression ops (no "replace")
+   ============================================================ */
 
-/** =========================
- *  1) REQUIRED CONFIG
- *  ========================= */
-const MAPBOX_TOKEN = "pk.eyJ1IjoiY2t1bmtlbCIsImEiOiJjbWx1Yjc4ODIwOW51M2Zwdm15dHFodnh1In0.F2yytru7jt9khYyPziZrHw"; // <-- PUT YOUR TOKEN HERE
+/*** 1) PUT YOUR TOKEN HERE ***/
+const MAPBOX_TOKEN = "pk.eyJ1IjoiY2t1bmtlbCIsImEiOiJjbWx1Yjc4ODIwOW51M2Zwdm15dHFodnh1In0.F2yytru7jt9khYyPziZrHw";
 
-// Your tileset id: "username.tilesetid"
-const MAPBOX_TILESET = "ckunkel.bp872kqi";
+/*** 2) CONFIG YOU MAY NEED TO EDIT ***/
+const CONFIG = {
+  // Your Mapbox tileset id (account.tileset)
+  // Example from your console: ckunkel.bp872kqi
+  tilesetId: "ckunkel.bp872kqi",
 
-// The *source-layer* inside the tileset (this must match what Mapbox Studio shows)
-// You referenced layers=MapBox-42vjbp in tilequery errors, so defaulting to that:
-const MAPBOX_TILESET_SOURCE_LAYER = "MapBox-42vjbp";
+  // Source-layer name inside the tileset (must match exactly)
+  // If you don’t know it: Mapbox Studio -> Tilesets -> your tileset -> “Layers”
+  sourceLayer: "MapBox-42vjbp", // <-- update if yours differs
 
-// Map style
-const MAP_STYLE = "mapbox://styles/mapbox/light-v11";
+  // URL to your filters.json (same folder as index.html/app.js on GitHub Pages)
+  filtersUrl: "./filters.json",
 
-// Default map view (centered roughly between your stores)
-const DEFAULT_CENTER = [-96.55, 30.35];
-const DEFAULT_ZOOM = 7.2;
+  // Map start view (tweak as desired)
+  center: [-96.3698, 30.6744],
+  zoom: 6.3,
 
-// Layer IDs we will create
-const LAYER_HEAT = "wl-heat";
-const LAYER_POINTS = "wl-points";
-const SOURCE_ID = "wl-src";
-
-/** =========================
- *  2) DOM HOOKS (index.html)
- *  =========================
- *  Expected element IDs:
- *  - map
- *  - branchSelect
- *  - groupSelect
- *  - startDate
- *  - endDate
- *  - metricSales
- *  - metricTickets
- *  - applyBtn
- *  - clearBtn
- *  - statusText (optional)
- */
-const el = {
-  map: document.getElementById("map"),
-  branch: document.getElementById("branchSelect"),
-  group: document.getElementById("groupSelect"),
-  start: document.getElementById("startDate"),
-  end: document.getElementById("endDate"),
-  metricSales: document.getElementById("metricSales"),
-  metricTickets: document.getElementById("metricTickets"),
-  apply: document.getElementById("applyBtn"),
-  clear: document.getElementById("clearBtn"),
-  status: document.getElementById("statusText")
+  // Heatmap feel (tweak)
+  heatmapMaxZoom: 10,
+  pointsMinZoom: 7.25
 };
 
-function log(...args) {
-  console.log("app.js: [WLHeatmap]", ...args);
-  if (el.status) el.status.textContent = args.join(" ");
+/*** 3) SMALL HELPERS ***/
+const log = (...args) => console.log("[WLHeatmap]", ...args);
+
+function $(id) {
+  return document.getElementById(id);
 }
 
-/** =========================
- *  3) STATE
- *  ========================= */
-const state = {
-  metric: "Sales", // "Sales" | "Tickets"
-  branches: [],
-  groups: [],
-  // filter selections:
-  branchSel: "ALL",
-  groupSel: "ALL",
-  startKey: null, // integer yyyymmdd
-  endKey: null
-};
-
-/** =========================
- *  4) HELPERS
- *  ========================= */
-
-// Convert yyyy-mm-dd (from <input type="date">) into int yyyymmdd
-function dateToKey(dateStr) {
-  if (!dateStr) return null;
-  // dateStr is "YYYY-MM-DD"
-  const y = dateStr.slice(0, 4);
-  const m = dateStr.slice(5, 7);
-  const d = dateStr.slice(8, 10);
-  const keyStr = `${y}${m}${d}`;
-  const n = Number(keyStr);
-  return Number.isFinite(n) ? n : null;
+function uniqSorted(arr) {
+  return Array.from(new Set((arr || []).filter(Boolean))).sort((a, b) =>
+    String(a).localeCompare(String(b))
+  );
 }
 
-function setSelectOptions(selectEl, values, includeAll = true) {
+// input[type="date"] => "YYYY-MM-DD" -> 20260102
+function dateStrToKey(dateStr) {
+  if (!dateStr || typeof dateStr !== "string") return null;
+  // expects YYYY-MM-DD
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateStr.trim());
+  if (!m) return null;
+  const y = Number(m[1]);
+  const mo = Number(m[2]);
+  const d = Number(m[3]);
+  if (!y || mo < 1 || mo > 12 || d < 1 || d > 31) return null;
+  return y * 10000 + mo * 100 + d;
+}
+
+function setStatus(text) {
+  const el = $("statusText") || $("status") || $("wlStatus");
+  if (el) el.textContent = text;
+}
+
+function fillSelect(selectEl, values, placeholder) {
   if (!selectEl) return;
   selectEl.innerHTML = "";
-  if (includeAll) {
-    const opt = document.createElement("option");
-    opt.value = "ALL";
-    opt.textContent = "All";
-    selectEl.appendChild(opt);
-  }
-  values.forEach(v => {
+
+  const opt0 = document.createElement("option");
+  opt0.value = "";
+  opt0.textContent = placeholder || "All";
+  selectEl.appendChild(opt0);
+
+  (values || []).forEach((v) => {
     const opt = document.createElement("option");
     opt.value = v;
     opt.textContent = v;
@@ -110,343 +80,293 @@ function setSelectOptions(selectEl, values, includeAll = true) {
   });
 }
 
-// Returns a Mapbox expression that converts a feature property into a safe number.
-// Handles: null, "", "$1,234.50", " 16.15 ", "1,234"
-function numField(fieldName) {
-  return [
-    "coalesce",
-    [
-      "to-number",
-      [
-        "replace",
-        ["replace", ["replace", ["to-string", ["get", fieldName]], ",", ""], "$", ""],
-        " ",
-        ""
-      ]
-    ],
-    0
-  ];
+/*** 4) BOOT ***/
+log("Booting...");
+
+mapboxgl.accessToken = MAPBOX_TOKEN;
+
+const map = new mapboxgl.Map({
+  container: "map",
+  style: "mapbox://styles/mapbox/light-v11",
+  center: CONFIG.center,
+  zoom: CONFIG.zoom
+});
+
+// UI elements (ids assumed; tweak your index.html ids to match)
+const branchSelect = $("branchSelect");
+const groupSelect = $("groupSelect");
+const startDateInput = $("startDate");
+const endDateInput = $("endDate");
+const metricSalesRadio = $("metricSales");
+const metricTicketsRadio = $("metricTickets");
+const applyBtn = $("applyBtn");
+const clearBtn = $("clearBtn");
+
+let metric = "Sales"; // "Sales" or "Tickets"
+
+/*** 5) LOAD FILTER LISTS ***/
+async function loadFiltersJson() {
+  log("Loading filter lists...");
+  try {
+    const res = await fetch(CONFIG.filtersUrl, { cache: "no-store" });
+    if (!res.ok) throw new Error(`filters.json HTTP ${res.status}`);
+    const json = await res.json();
+
+    const branches = uniqSorted(json.branches || []);
+    const groups = uniqSorted(json.groups || []);
+
+    fillSelect(branchSelect, branches, "All Branches");
+    fillSelect(groupSelect, groups, "All Product Groups");
+
+    log(`Loaded filters.json • ${branches.length} branches • ${groups.length} groups`);
+  } catch (e) {
+    console.warn("[WLHeatmap] Failed to load filters.json:", e);
+    // Don’t hard-fail. Just leave selects as-is.
+    log("Continuing without filters.json (dropdowns may be empty).");
+  }
 }
 
-function metricExpr() {
-  // Returns numeric value expression based on state.metric
-  return state.metric === "Tickets" ? numField("TicketCount") : numField("TotalSales");
+/*** 6) MAPBOX EXPRESSIONS ***/
+// IMPORTANT: Mapbox GL JS v3 style expressions do NOT support a "replace" operator.
+// So we assume your tileset properties are either numeric or numeric strings (e.g., "16.15").
+// If Mapbox imported them as non-numeric (currency symbols, commas), fix the CSV export.
+function numExprForField(fieldName) {
+  // coalesce(to-number(get(field)), 0)
+  return ["coalesce", ["to-number", ["get", fieldName]], 0];
+}
+
+function metricFieldName() {
+  return metric === "Tickets" ? "TicketCount" : "TotalSales";
+}
+
+function metricLabel() {
+  return metric === "Tickets" ? "Tickets" : "Sales";
 }
 
 function heatWeightExpr() {
-  // Weight function: ln(1 + metric)
-  return ["ln", ["+", 1, metricExpr()]];
-}
-
-function pointsRadiusExpr() {
-  // Circle radius ramp; based on ln metric
-  const lnMetric = heatWeightExpr();
-  return ["interpolate", ["linear"], lnMetric, 0, 2, 3, 4, 6, 8, 9, 14];
+  // ln(1 + value) mapped later by heatmap built-in kernel
+  return ["ln", ["+", 1, numExprForField(metricFieldName())]];
 }
 
 function heatIntensityExpr() {
-  // Heatmap intensity ramp; based on ln metric
-  const lnMetric = heatWeightExpr();
-  return ["interpolate", ["linear"], lnMetric, 0, 0, 8, 1];
+  // Let intensity ramp with zoom and data
+  // interpolate(linear, zoom, 0, 0.6, 7, 1.2, 10, 2.0, 12, 3.0)
+  return ["interpolate", ["linear"], ["zoom"], 0, 0.6, 7, 1.2, 10, 2.0, 12, 3.0];
 }
 
-function buildFilterExpression() {
-  // Mapbox filter expression for the source layers
-  // We will use:
-  // - BranchName
-  // - ProductGroupLevel1
-  // - SaleDateKey (int)
-  //
-  // Return an "all" expression combining conditions.
+function heatRadiusExpr() {
+  // Smooth radius by zoom
+  return ["interpolate", ["linear"], ["zoom"], 4, 12, 7, 20, 10, 34, 12, 48];
+}
 
+function heatColorExpr() {
+  // You said you like this look — keep it clean with a smooth ramp
+  return [
+    "interpolate",
+    ["linear"],
+    ["heatmap-density"],
+    0, "rgba(0,0,0,0)",
+    0.10, "rgba(0, 145, 255, 0.25)",
+    0.25, "rgba(0, 145, 255, 0.55)",
+    0.45, "rgba(0, 200, 120, 0.65)",
+    0.65, "rgba(255, 220, 0, 0.75)",
+    0.85, "rgba(255, 120, 0, 0.85)",
+    1.00, "rgba(255, 0, 0, 0.95)"
+  ];
+}
+
+function circleRadiusExpr() {
+  // Circle size should reflect data but not explode
+  // interpolate(linear, ln(1+value), 0, 2, 4, 6, 8, 10)
+  return [
+    "interpolate",
+    ["linear"],
+    ["ln", ["+", 1, numExprForField(metricFieldName())]],
+    0, 2,
+    3, 4,
+    6, 7,
+    9, 11
+  ];
+}
+
+function circleOpacityExpr() {
+  return ["interpolate", ["linear"], ["zoom"], CONFIG.pointsMinZoom, 0.0, CONFIG.pointsMinZoom + 0.75, 0.9];
+}
+
+/*** 7) BUILD FILTER FOR LAYERS ***/
+function buildLayerFilter() {
   const filters = ["all"];
 
-  // Branch
-  if (state.branchSel && state.branchSel !== "ALL") {
-    filters.push(["==", ["get", "BranchName"], state.branchSel]);
+  const branch = branchSelect ? branchSelect.value : "";
+  const group = groupSelect ? groupSelect.value : "";
+
+  const startKey = dateStrToKey(startDateInput ? startDateInput.value : "");
+  const endKey = dateStrToKey(endDateInput ? endDateInput.value : "");
+
+  // BranchName filter
+  if (branch) {
+    filters.push(["==", ["get", "BranchName"], branch]);
   }
 
-  // Product group
-  if (state.groupSel && state.groupSel !== "ALL") {
-    filters.push(["==", ["get", "ProductGroupLevel1"], state.groupSel]);
+  // ProductGroupLevel1 filter
+  if (group) {
+    filters.push(["==", ["get", "ProductGroupLevel1"], group]);
   }
 
-  // Date range (handles start-only or end-only)
-  if (Number.isFinite(state.startKey)) {
-    filters.push([">=", ["to-number", ["get", "SaleDateKey"]], state.startKey]);
+  // Date filter: compare against SaleDateKey (yyyymmdd)
+  // coalesce(to-number(get(SaleDateKey)), 0)
+  const saleDateKeyExpr = ["coalesce", ["to-number", ["get", "SaleDateKey"]], 0];
+
+  if (startKey != null) {
+    filters.push([">=", saleDateKeyExpr, startKey]);
   }
-  if (Number.isFinite(state.endKey)) {
-    filters.push(["<=", ["to-number", ["get", "SaleDateKey"]], state.endKey]);
+  if (endKey != null) {
+    filters.push(["<=", saleDateKeyExpr, endKey]);
   }
 
   return filters;
 }
 
-/** =========================
- *  5) LOAD FILTER LISTS
- *  ========================= */
-async function loadFiltersJson() {
-  log("Loading filter lists...");
-  try {
-    const res = await fetch("./filters.json", { cache: "no-store" });
-    if (!res.ok) throw new Error(`filters.json HTTP ${res.status}`);
-    const json = await res.json();
+/*** 8) APPLY FILTERS + METRIC ***/
+function applyFilters() {
+  const f = buildLayerFilter();
 
-    state.branches = Array.isArray(json.branches) ? json.branches.slice() : [];
-    state.groups = Array.isArray(json.groups) ? json.groups.slice() : [];
+  // Apply filters
+  if (map.getLayer("wl-heat")) map.setFilter("wl-heat", f);
+  if (map.getLayer("wl-points")) map.setFilter("wl-points", f);
 
-    log(`Loaded filters.json • ${state.branches.length} branches • ${state.groups.length} groups`);
-    return true;
-  } catch (err) {
-    console.warn("[WLHeatmap] filters.json load failed; will fallback", err);
-    return false;
-  }
-}
-
-/**
- * Fallback: sample some rendered features after map load to build dropdowns.
- * This avoids tilequery 422 spam and works as long as some data is visible.
- */
-function loadFiltersFromRenderedFeatures(map) {
-  try {
-    const feats = map.queryRenderedFeatures({ layers: [LAYER_POINTS] }) || [];
-    const branches = new Set();
-    const groups = new Set();
-
-    feats.forEach(f => {
-      const p = f.properties || {};
-      if (p.BranchName) branches.add(p.BranchName);
-      if (p.ProductGroupLevel1) groups.add(p.ProductGroupLevel1);
-    });
-
-    const bList = Array.from(branches).sort();
-    const gList = Array.from(groups).sort();
-
-    if (bList.length) state.branches = bList;
-    if (gList.length) state.groups = gList;
-
-    log("Loaded filters from visible data (fallback)");
-  } catch (e) {
-    console.warn("[WLHeatmap] fallback filter sampling failed", e);
-  }
-}
-
-/** =========================
- *  6) APPLY / CLEAR
- *  ========================= */
-function readUiIntoState() {
-  state.branchSel = el.branch ? el.branch.value : "ALL";
-  state.groupSel = el.group ? el.group.value : "ALL";
-  state.startKey = dateToKey(el.start ? el.start.value : "");
-  state.endKey = dateToKey(el.end ? el.end.value : "");
-}
-
-function applyFiltersToMap(map) {
-  const filterExpr = buildFilterExpression();
-
-  // Apply to both layers
-  if (map.getLayer(LAYER_HEAT)) map.setFilter(LAYER_HEAT, filterExpr);
-  if (map.getLayer(LAYER_POINTS)) map.setFilter(LAYER_POINTS, filterExpr);
-
-  // Update paint based on metric
-  if (map.getLayer(LAYER_HEAT)) {
-    map.setPaintProperty(LAYER_HEAT, "heatmap-intensity", heatIntensityExpr());
-    map.setPaintProperty(LAYER_HEAT, "heatmap-weight", heatWeightExpr());
-  }
-  if (map.getLayer(LAYER_POINTS)) {
-    map.setPaintProperty(LAYER_POINTS, "circle-radius", pointsRadiusExpr());
+  // Update paint props for metric changes
+  // Heatmap
+  if (map.getLayer("wl-heat")) {
+    map.setPaintProperty("wl-heat", "heatmap-weight", heatWeightExpr());
+    map.setPaintProperty("wl-heat", "heatmap-intensity", heatIntensityExpr());
+    map.setPaintProperty("wl-heat", "heatmap-radius", heatRadiusExpr());
+    map.setPaintProperty("wl-heat", "heatmap-color", heatColorExpr());
   }
 
-  log(`Applied filters • Metric: ${state.metric}`);
+  // Points
+  if (map.getLayer("wl-points")) {
+    map.setPaintProperty("wl-points", "circle-radius", circleRadiusExpr());
+    map.setPaintProperty("wl-points", "circle-opacity", circleOpacityExpr());
+  }
+
+  log(`Applied filters • Metric: ${metricLabel()}`);
+  setStatus(`Metric: ${metricLabel()}`);
 }
 
-function clearUi() {
-  if (el.branch) el.branch.value = "ALL";
-  if (el.group) el.group.value = "ALL";
-  if (el.start) el.start.value = "";
-  if (el.end) el.end.value = "";
+/*** 9) CLEAR ***/
+function clearFilters() {
+  if (branchSelect) branchSelect.value = "";
+  if (groupSelect) groupSelect.value = "";
+  if (startDateInput) startDateInput.value = "";
+  if (endDateInput) endDateInput.value = "";
 
-  // Default metric to Sales
-  state.metric = "Sales";
-  if (el.metricSales) el.metricSales.checked = true;
-  if (el.metricTickets) el.metricTickets.checked = false;
+  // Default metric to Sales (optional)
+  metric = "Sales";
+  if (metricSalesRadio) metricSalesRadio.checked = true;
+  if (metricTicketsRadio) metricTicketsRadio.checked = false;
 
-  // Reset state selection
-  state.branchSel = "ALL";
-  state.groupSel = "ALL";
-  state.startKey = null;
-  state.endKey = null;
+  applyFilters();
 }
 
-/** =========================
- *  7) INIT MAP + LAYERS
- *  ========================= */
-function initMap() {
-  mapboxgl.accessToken = MAPBOX_TOKEN;
+/*** 10) ADD LAYERS ***/
+map.on("load", async () => {
+  await loadFiltersJson();
 
-  const map = new mapboxgl.Map({
-    container: "map",
-    style: MAP_STYLE,
-    center: DEFAULT_CENTER,
-    zoom: DEFAULT_ZOOM
-  });
+  log("Map loaded. Adding layers...");
 
-  // Expose for console debugging (fixes your “map.queryRenderedFeatures…” issue)
-  window.WL_MAP = map;
-
-  map.addControl(new mapboxgl.NavigationControl(), "top-right");
-
-  map.on("load", () => {
-    log("Map loaded. Adding layers...");
-
-    // Add vector tileset source
-    map.addSource(SOURCE_ID, {
+  // Vector source for your tileset
+  const sourceId = "wl-src";
+  if (!map.getSource(sourceId)) {
+    map.addSource(sourceId, {
       type: "vector",
-      url: `mapbox://${MAPBOX_TILESET}`
+      url: `mapbox://${CONFIG.tilesetId}`
     });
+  }
 
-    // Heatmap layer
+  // Heatmap layer
+  if (!map.getLayer("wl-heat")) {
     map.addLayer(
       {
-        id: LAYER_HEAT,
+        id: "wl-heat",
         type: "heatmap",
-        source: SOURCE_ID,
-        "source-layer": MAPBOX_TILESET_SOURCE_LAYER,
-        maxzoom: 12,
+        source: sourceId,
+        "source-layer": CONFIG.sourceLayer,
+        maxzoom: CONFIG.heatmapMaxZoom,
+        filter: buildLayerFilter(),
         paint: {
-          // These will be updated dynamically on apply, but set defaults now
           "heatmap-weight": heatWeightExpr(),
           "heatmap-intensity": heatIntensityExpr(),
-          "heatmap-radius": [
-            "interpolate",
-            ["linear"],
-            ["zoom"],
-            6, 10,
-            8, 18,
-            10, 28,
-            12, 40
-          ],
-          "heatmap-opacity": [
-            "interpolate",
-            ["linear"],
-            ["zoom"],
-            6, 0.85,
-            12, 0.55
-          ]
+          "heatmap-radius": heatRadiusExpr(),
+          "heatmap-color": heatColorExpr(),
+          "heatmap-opacity": ["interpolate", ["linear"], ["zoom"], 0, 0.95, CONFIG.heatmapMaxZoom, 0.55]
         }
       },
-      // place under labels if possible
+      // place below labels if possible
       "waterway-label"
     );
+  }
 
-    // Points layer
+  // Circle points layer (for “dots”)
+  if (!map.getLayer("wl-points")) {
     map.addLayer({
-      id: LAYER_POINTS,
+      id: "wl-points",
       type: "circle",
-      source: SOURCE_ID,
-      "source-layer": MAPBOX_TILESET_SOURCE_LAYER,
-      minzoom: 6,
+      source: sourceId,
+      "source-layer": CONFIG.sourceLayer,
+      minzoom: CONFIG.pointsMinZoom,
+      filter: buildLayerFilter(),
       paint: {
-        "circle-radius": pointsRadiusExpr(),
-        "circle-opacity": 0.55
+        "circle-radius": circleRadiusExpr(),
+        "circle-color": "rgba(0,0,0,0.55)",
+        "circle-stroke-color": "rgba(255,255,255,0.85)",
+        "circle-stroke-width": 1,
+        "circle-opacity": circleOpacityExpr()
       }
     });
+  }
 
-    // If filters.json failed, sample visible data after first render
-    // (but only if we don't already have lists)
-    setTimeout(() => {
-      if (!state.branches.length || !state.groups.length) {
-        loadFiltersFromRenderedFeatures(map);
-        setSelectOptions(el.branch, state.branches, true);
-        setSelectOptions(el.group, state.groups, true);
+  // Wire up UI
+  if (metricSalesRadio) {
+    metricSalesRadio.addEventListener("change", () => {
+      if (metricSalesRadio.checked) {
+        metric = "Sales";
+        log("Metric set to Sales");
+        applyFilters();
       }
-    }, 900);
+    });
+  }
+  if (metricTicketsRadio) {
+    metricTicketsRadio.addEventListener("change", () => {
+      if (metricTicketsRadio.checked) {
+        metric = "Tickets";
+        log("Metric set to Tickets");
+        applyFilters();
+      }
+    });
+  }
 
-    // Start with defaults applied
-    applyFiltersToMap(map);
-    log("Ready");
+  // Apply / Clear buttons
+  if (applyBtn) applyBtn.addEventListener("click", applyFilters);
+  if (clearBtn) clearBtn.addEventListener("click", clearFilters);
+
+  // Optional: pressing Enter inside date fields applies
+  [startDateInput, endDateInput].forEach((el) => {
+    if (!el) return;
+    el.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") applyFilters();
+    });
   });
 
-  return map;
+  // Start state
+  if (metricSalesRadio) metricSalesRadio.checked = true;
+  metric = "Sales";
+  applyFilters();
+
+  log("Ready");
+});
+
+/*** 11) SAFETY: TOKEN CHECK ***/
+if (!MAPBOX_TOKEN || MAPBOX_TOKEN.includes("PASTE_YOUR_MAPBOX")) {
+  console.warn("[WLHeatmap] You still need to set MAPBOX_TOKEN at the top of app.js");
 }
-
-/** =========================
- *  8) WIRE UI EVENTS
- *  ========================= */
-function wireUi(map) {
-  // Metric radio buttons
-  if (el.metricSales) {
-    el.metricSales.addEventListener("change", () => {
-      if (el.metricSales.checked) {
-        state.metric = "Sales";
-        log("Metric set to Sales");
-        applyFiltersToMap(map);
-      }
-    });
-  }
-  if (el.metricTickets) {
-    el.metricTickets.addEventListener("change", () => {
-      if (el.metricTickets.checked) {
-        state.metric = "Tickets";
-        log("Metric set to Tickets");
-        applyFiltersToMap(map);
-      }
-    });
-  }
-
-  // Apply button
-  if (el.apply) {
-    el.apply.addEventListener("click", () => {
-      readUiIntoState();
-      applyFiltersToMap(map);
-    });
-  }
-
-  // Clear button
-  if (el.clear) {
-    el.clear.addEventListener("click", () => {
-      clearUi();
-      applyFiltersToMap(map);
-    });
-  }
-
-  // Optional: apply automatically when dropdowns change (nice UX)
-  if (el.branch) {
-    el.branch.addEventListener("change", () => {
-      readUiIntoState();
-      applyFiltersToMap(map);
-    });
-  }
-  if (el.group) {
-    el.group.addEventListener("change", () => {
-      readUiIntoState();
-      applyFiltersToMap(map);
-    });
-  }
-}
-
-/** =========================
- *  9) BOOT
- *  ========================= */
-(async function boot() {
-  log("Booting...");
-
-  const gotFilters = await loadFiltersJson();
-
-  // Populate selects immediately from filters.json
-  if (gotFilters) {
-    setSelectOptions(el.branch, state.branches, true);
-    setSelectOptions(el.group, state.groups, true);
-  } else {
-    // show placeholders; will fill after map loads via fallback sampling
-    setSelectOptions(el.branch, [], true);
-    setSelectOptions(el.group, [], true);
-  }
-
-  // Default metric state in UI
-  if (el.metricSales) el.metricSales.checked = true;
-  if (el.metricTickets) el.metricTickets.checked = false;
-
-  const map = initMap();
-  wireUi(map);
-})();
