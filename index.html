@@ -24,7 +24,8 @@
       background: #fff;
       overflow: auto;
     }
-    #map { flex: 1; min-width: 0; }
+    #map { flex: 1; min-width: 0; min-height: 600px; }
+    #map, .mapboxgl-map, canvas.mapboxgl-canvas { pointer-events: auto !important; }
     .row { margin-bottom: 10px; }
     label { display: block; font-size: 12px; margin-bottom: 4px; color: #374151; }
     select, input, button {
@@ -112,6 +113,6 @@
   </script>
 
   <!-- Your app logic -->
-  <script src="app.js" defer></script>
+  <script src="app.js"></script>
 </body>
 </html>
