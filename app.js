@@ -291,98 +291,6 @@ if (canDateFilter) {
       });
     }
 
-
-// =========================
-// Hover tooltip on points
-// =========================
-function wirePointHoverTooltip() {
-  if (!map || !map.getLayer(POINT_LAYER_ID)) return;
-
-  const hoverPopup = new mapboxgl.Popup({
-    closeButton: false,
-    closeOnClick: false,
-    maxWidth: "320px",
-  });
-
-  const fmtMoney = (v) => {
-    const n = Number(v);
-    if (!isFinite(n)) return "$0.00";
-    return n.toLocaleString(undefined, { style: "currency", currency: "USD" });
-  };
-
-  const fmtNum = (v) => {
-    const n = Number(v);
-    if (!isFinite(n)) return "0";
-    return n.toLocaleString();
-  };
-
-  const getProp = (p, key) => (p && p[key] != null ? p[key] : undefined);
-
-  map.on("mouseenter", POINT_LAYER_ID, () => {
-    map.getCanvas().style.cursor = "pointer";
-  });
-
-  map.on("mouseleave", POINT_LAYER_ID, () => {
-    map.getCanvas().style.cursor = "";
-    hoverPopup.remove();
-  });
-
-  map.on("mousemove", POINT_LAYER_ID, (e) => {
-    const f = e.features && e.features[0];
-    if (!f) return;
-
-    const p = f.properties || {};
-
-    const branch = getProp(p, "BranchName") ?? "—";
-    const zip = getProp(p, "Zip5") ?? "—";
-    const group = getProp(p, "ProductGroupLevel1") ?? "—";
-
-    // Dates: prefer BOM SaleDate (M/D/YYYY), fall back to ISO if present
-    const saleDate =
-      getProp(p, BOM_SALEDATE_FIELD) ??
-      getProp(p, "SaleDate") ??
-      getProp(p, "\ufeffSaleDateISO") ??
-      getProp(p, "SaleDateISO") ??
-      "—";
-
-    const tickets = getProp(p, "TicketCount") ?? 0;
-    const sales = getProp(p, "TotalSales") ?? 0;
-    const profit = getProp(p, "TotalProfit") ?? 0;
-
-    // Coordinates: prefer geometry point, fall back to Lon/Lat props if needed
-    let coords = null;
-    if (f.geometry && f.geometry.type === "Point" && Array.isArray(f.geometry.coordinates)) {
-      coords = f.geometry.coordinates.slice();
-    } else {
-      const lon = Number(getProp(p, "Lon"));
-      const lat = Number(getProp(p, "Lat"));
-      if (isFinite(lon) && isFinite(lat)) coords = [lon, lat];
-    }
-    if (!coords) return;
-
-    // Handle world-wrap
-    while (Math.abs(e.lngLat.lng - coords[0]) > 180) {
-      coords[0] += e.lngLat.lng > coords[0] ? 360 : -360;
-    }
-
-    const html = `
-      <div style="font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;">
-        <div style="font-weight:700; font-size:13px; margin-bottom:6px;">${zip} • ${branch}</div>
-        <div style="font-size:12px; opacity:.9; margin-bottom:8px;">${saleDate}</div>
-        <div style="font-size:12px; margin-bottom:8px;"><b>Group:</b> ${group}</div>
-        <div style="display:grid; grid-template-columns: 1fr 1fr; gap:8px; font-size:12px;">
-          <div><b>Tickets</b><br>${fmtNum(tickets)}</div>
-          <div><b>Sales</b><br>${fmtMoney(sales)}</div>
-          <div><b>Profit</b><br>${fmtMoney(profit)}</div>
-        </div>
-      </div>
-    `;
-
-    hoverPopup.setLngLat(coords).setHTML(html).addTo(map);
-  });
-}
-
-
     const metricProp = METRICS[state.metric].prop;
     const metricNum = safeToNumberExpr(metricProp);
 
@@ -559,7 +467,115 @@ try {
     await loadFilters();
     wireUI();
 
-    map.on("load", () => {
+    
+// =========================
+// Hover tooltip on points
+// =========================
+function wirePointHoverTooltip() {
+  if (!map) return;
+
+  // Avoid double-binding if load re-runs in dev/hot reload scenarios
+  if (wirePointHoverTooltip._bound) return;
+  wirePointHoverTooltip._bound = true;
+
+  const hoverPopup = new mapboxgl.Popup({
+    closeButton: false,
+    closeOnClick: false,
+    maxWidth: "320px",
+  });
+
+  const fmtMoney = (v) => {
+    const n = Number(v);
+    if (!isFinite(n)) return "$0.00";
+    return n.toLocaleString(undefined, { style: "currency", currency: "USD" });
+  };
+
+  const fmtNum = (v) => {
+    const n = Number(v);
+    if (!isFinite(n)) return "0";
+    return n.toLocaleString();
+  };
+
+  const getProp = (p, key) => (p && p[key] != null ? p[key] : undefined);
+
+  const bindHandlers = () => {
+    if (!map.getLayer(POINT_LAYER_ID)) return false;
+
+    map.on("mouseenter", POINT_LAYER_ID, () => {
+      map.getCanvas().style.cursor = "pointer";
+    });
+
+    map.on("mouseleave", POINT_LAYER_ID, () => {
+      map.getCanvas().style.cursor = "";
+      hoverPopup.remove();
+    });
+
+    map.on("mousemove", POINT_LAYER_ID, (e) => {
+      const f = e.features && e.features[0];
+      if (!f) return;
+
+      const p = f.properties || {};
+
+      const branch = getProp(p, "BranchName") ?? "—";
+      const zip = getProp(p, "Zip5") ?? "—";
+      const group = getProp(p, "ProductGroupLevel1") ?? "—";
+
+      // Dates: prefer BOM SaleDate (M/D/YYYY), fall back to ISO if present
+      const saleDate =
+        getProp(p, BOM_SALEDATE_FIELD) ??
+        getProp(p, "SaleDate") ??
+        getProp(p, "\ufeffSaleDateISO") ??
+        getProp(p, "SaleDateISO") ??
+        "—";
+
+      const tickets = getProp(p, "TicketCount") ?? 0;
+      const sales = getProp(p, "TotalSales") ?? 0;
+      const profit = getProp(p, "TotalProfit") ?? 0;
+
+      // Coordinates: prefer geometry point, fall back to Lon/Lat props if needed
+      let coords = null;
+      if (f.geometry && f.geometry.type === "Point" && Array.isArray(f.geometry.coordinates)) {
+        coords = f.geometry.coordinates.slice();
+      } else {
+        const lon = Number(getProp(p, "Lon"));
+        const lat = Number(getProp(p, "Lat"));
+        if (isFinite(lon) && isFinite(lat)) coords = [lon, lat];
+      }
+      if (!coords) return;
+
+      // Handle world-wrap
+      while (Math.abs(e.lngLat.lng - coords[0]) > 180) {
+        coords[0] += e.lngLat.lng > coords[0] ? 360 : -360;
+      }
+
+      const html = `
+        <div style="font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;">
+          <div style="font-weight:700; font-size:13px; margin-bottom:6px;">${zip} • ${branch}</div>
+          <div style="font-size:12px; opacity:.9; margin-bottom:8px;">${saleDate}</div>
+          <div style="font-size:12px; margin-bottom:8px;"><b>Group:</b> ${group}</div>
+          <div style="display:grid; grid-template-columns: 1fr 1fr; gap:8px; font-size:12px;">
+            <div><b>Tickets</b><br>${fmtNum(tickets)}</div>
+            <div><b>Sales</b><br>${fmtMoney(sales)}</div>
+            <div><b>Profit</b><br>${fmtMoney(profit)}</div>
+          </div>
+        </div>
+      `;
+
+      hoverPopup.setLngLat(coords).setHTML(html).addTo(map);
+    });
+
+    return true;
+  };
+
+  // Bind now if layer exists, otherwise wait until after layers are added
+  if (!bindHandlers()) {
+    map.once("idle", () => {
+      bindHandlers();
+    });
+  }
+}
+
+map.on("load", () => {
       log("Map loaded. Adding layers...");
       ensureLayers();
       wirePointHoverTooltip();
