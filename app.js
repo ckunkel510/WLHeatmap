@@ -68,32 +68,33 @@
   }
 
   function safeToNumberExpr(propName) {
-    // Forces numeric conversion even if Mapbox typed the column as string
-    return ["to-number", ["get", propName], 0];
-  }
+  return ["coalesce", ["to-number", ["get", propName]], 0];
+}
 
   // Build numeric YYYYMMDD from the tileset's M/D/YYYY string in "﻿SaleDate"
   // Example: "2/11/2026" => 20260211
  // Build numeric YYYYMMDD from the tileset's M/D/YYYY string in "﻿SaleDate"
 // Example: "2/11/2026" => 20260211
 function saleDateKeyFromBOMExpr() {
-  const ds = [
-    "to-string",
-    [
-      "coalesce",
-      ["get", BOM_SALEDATE_FIELD], // "\ufeffSaleDate"
-      ["get", "SaleDate"],
-      ""
-    ]
+  // Get the raw date string (M/D/YYYY). Use BOM field first, then non-BOM, then "".
+  const raw = [
+    "coalesce",
+    ["get", BOM_SALEDATE_FIELD], // "\ufeffSaleDate"
+    ["get", "SaleDate"],
+    ["literal", ""]
   ];
 
-  const parts = ["split", ds, "/"]; // ["M","D","YYYY"] (strings)
+  // Ensure it's a string
+  const ds = ["to-string", raw];
 
+  // Split on "/" — wrap "/" as a literal to satisfy validator
+  const parts = ["split", ds, ["literal", "/"]];
+
+  // Pull y/m/d, coalesce to 0 if missing
   const y = ["coalesce", ["to-number", ["at", 2, parts]], 0];
   const m = ["coalesce", ["to-number", ["at", 0, parts]], 0];
   const d = ["coalesce", ["to-number", ["at", 1, parts]], 0];
 
-  // Always numeric YYYYMMDD (or 0 if invalid)
   return ["+", ["*", y, 10000], ["*", m, 100], d];
 }
 
