@@ -1,247 +1,414 @@
-// ====== CONFIG (EDIT THESE) ======
-const MAPBOX_TOKEN = "pk.eyJ1IjoiY2t1bmtlbCIsImEiOiJjbWx1Yjc4ODIwOW51M2Zwdm15dHFodnh1In0.F2yytru7jt9khYyPziZrHw";
-const TILESET_ID   = "ckunkel.bp872kqi";
-const SOURCE_LAYER = "MapBox-42vjbp";
-const FILTERS_JSON_URL = "./filters.json"; // optional, set to null to disable
-// ================================
+/* app.js
+   WL Zip Sales Heatmap (Mapbox GL JS v3)
 
-mapboxgl.accessToken = MAPBOX_TOKEN;
+   REQUIREMENTS (your tileset properties):
+   - BranchName (string)
+   - ProductGroupLevel1 (string)
+   - Zip5 (string or number)
+   - TicketCount (number)
+   - TotalSales (number)
+   - TotalProfit (number)
+   - SaleDateKey (number)  <-- strongly recommended: YYYYMMDD (e.g., 20260102)
 
-const map = new mapboxgl.Map({
-  container: "map",
-  style: "mapbox://styles/mapbox/light-v11",
-  center: [-96.7, 30.7],
-  zoom: 6
-});
+   OPTIONAL (for display only):
+   - SaleDate (string)
 
-const UI = {
-  branchSelect: document.getElementById("branchSelect"),
-  groupSelect: document.getElementById("groupSelect"),
-  metricSales: document.getElementById("metricSales"),
-  metricTickets: document.getElementById("metricTickets"),
-  startDate: document.getElementById("startDate"),
-  endDate: document.getElementById("endDate"),
-  applyDates: document.getElementById("applyDates"),
-  clearDates: document.getElementById("clearDates")
-};
+   Notes:
+   - This file supports:
+     ✅ Heatmap weight toggle (TotalSales vs TicketCount)
+     ✅ Branch dropdown (uses filters.json if present; otherwise sampling)
+     ✅ Product group dropdown (same)
+     ✅ Date range filter (uses SaleDateKey numeric filtering)
+     ✅ Works on GitHub Pages
+*/
 
-let metric = "sales"; // "sales" | "tickets"
+(() => {
+  // =========================
+  // CONFIG (EDIT THESE)
+  // =========================
+  const MAPBOX_TOKEN = "pk.eyJ1IjoiY2t1bmtlbCIsImEiOiJjbWx1Yjc4ODIwOW51M2Zwdm15dHFodnh1In0.F2yytru7jt9khYyPziZrHw"; // set in index.html before app.js OR paste here
+  const TILESET_ID = "ckunkel.bp872kqi";          // your tileset id
+  const SOURCE_LAYER = "MapBox-42vjbp";           // your source-layer name EXACT
+  const DEFAULT_CENTER = [-96.7, 30.6];           // Texas-ish
+  const DEFAULT_ZOOM = 6.2;
 
-function setActiveMetricButtons() {
-  UI.metricSales.classList.toggle("activeBtn", metric === "sales");
-  UI.metricTickets.classList.toggle("activeBtn", metric === "tickets");
-}
+  // Layer IDs
+  const SOURCE_ID = "zips-src";
+  const HEAT_LAYER_ID = "zips-heat";
+  const POINT_LAYER_ID = "zips-points";
 
-/**
- * Date filtering notes:
- * - We assume feature property "SaleDate" is a string "YYYY-MM-DD".
- * - String comparison works correctly for ISO dates.
- */
-function toMDY(iso) {
-  // iso = "YYYY-MM-DD" from <input type="date">
-  if (!iso) return "";
-  const [y, m, d] = iso.split("-").map(Number);
-  return `${m}/${d}/${y}`; // matches your tileset format like 1/2/2026
-}
+  // If you want circles at high zoom, set to true
+  const ENABLE_POINT_LAYER = true;
 
-function buildFilter() {
-  const branch = UI.branchSelect.value;
-  const group  = UI.groupSelect.value;
+  // Where we try to load full lists from (recommended)
+  const FILTERS_JSON_URL = "./filters.json";
 
-  const startIso = UI.startDate.value;
-  const endIso   = UI.endDate.value;
+  // Sampling settings (fallback if filters.json not found)
+  const SAMPLE_ZOOMS = [6, 7, 8, 9, 10];
+  const SAMPLE_LIMIT_PER_QUERY = 5000; // Mapbox tilequery limit is typically 50k; keep safe
 
-  const start = toMDY(startIso);
-  const end   = toMDY(endIso);
-
-  const f = ["all"];
-
-  if (branch !== "__all__") f.push(["==", ["get", "BranchName"], branch]);
-  if (group  !== "__all__") f.push(["==", ["get", "ProductGroupLevel1"], group]);
-
-  // Date range (string compare) — works OK within same year/month ranges but ISO is still better
-  if (start) f.push([">=", ["get", "SaleDate"], start]);
-  if (end)   f.push(["<=", ["get", "SaleDate"], end]);
-
-  return f;
-}
-
-function setHeatmapWeight() {
-  if (metric === "sales") {
-    map.setPaintProperty("zips-heat", "heatmap-weight", [
-      "interpolate", ["linear"], ["coalesce", ["get", "TotalSales"], 0],
-      0, 0,
-      250, 0.15,
-      1000, 0.35,
-      5000, 0.75,
-      15000, 1
-    ]);
-  } else {
-    map.setPaintProperty("zips-heat", "heatmap-weight", [
-      "interpolate", ["linear"], ["coalesce", ["get", "TicketCount"], 0],
-      0, 0,
-      1, 0.15,
-      10, 0.40,
-      40, 0.75,
-      120, 1
-    ]);
-  }
-}
-
-function applyFiltersAndMetric() {
-  const filter = buildFilter();
-
-  if (map.getLayer("zips-heat")) map.setFilter("zips-heat", filter);
-  if (map.getLayer("zips-circles")) map.setFilter("zips-circles", filter);
-
-  setHeatmapWeight();
-}
-
-function wireUI() {
-  UI.branchSelect.addEventListener("change", applyFiltersAndMetric);
-  UI.groupSelect.addEventListener("change", applyFiltersAndMetric);
-
-  UI.metricSales.addEventListener("click", () => {
-    metric = "sales";
-    setActiveMetricButtons();
-    applyFiltersAndMetric();
-  });
-
-  UI.metricTickets.addEventListener("click", () => {
-    metric = "tickets";
-    setActiveMetricButtons();
-    applyFiltersAndMetric();
-  });
-
-  // Date controls
-  UI.applyDates.addEventListener("click", applyFiltersAndMetric);
-
-  UI.clearDates.addEventListener("click", () => {
-    UI.startDate.value = "";
-    UI.endDate.value = "";
-    applyFiltersAndMetric();
-  });
-}
-
-function addOption(selectEl, value, label) {
-  const opt = document.createElement("option");
-  opt.value = value;
-  opt.textContent = label;
-  selectEl.appendChild(opt);
-}
-
-async function tryLoadFiltersJson() {
-  if (!FILTERS_JSON_URL) return false;
-
-  try {
-    const res = await fetch(FILTERS_JSON_URL, { cache: "no-store" });
-    if (!res.ok) return false;
-    const json = await res.json();
-
-    const branches = Array.isArray(json.branches) ? json.branches : [];
-    const groups   = Array.isArray(json.productGroupsLevel1) ? json.productGroupsLevel1 : [];
-
-    branches.sort().forEach(b => addOption(UI.branchSelect, b, b));
-    groups.sort().forEach(g => addOption(UI.groupSelect, g, g));
-
-    return branches.length > 0 || groups.length > 0;
-  } catch (e) {
-    return false;
-  }
-}
-
-// Fallback sampling (may miss some values if not using filters.json)
-async function sampleDistinctValues() {
-  const sampleCenters = [
-    [-96.8, 30.6],
-    [-95.4, 29.8],
-    [-97.7, 30.3],
-    [-96.1, 31.5]
+  const SAMPLE_CENTERS = [
+    [-96.3698, 30.6744], // Bryan
+    [-96.3250, 30.1699], // Brenham-ish
+    [-96.4012, 30.1790], // Brenham center-ish
+    [-96.5500, 30.5300], // between Bryan/Brenham
+    [-96.0100, 30.3000], // toward College Station area
+    [-95.3698, 29.7604], // Houston
+    [-97.7431, 30.2672], // Austin
+    [-96.7969, 32.7763]  // Dallas
   ];
 
-  async function tilequery(lngLat) {
-    const [lng, lat] = lngLat;
-    const url =
-      `https://api.mapbox.com/v4/${TILESET_ID}/tilequery/${lng},${lat}.json` +
-      `?radius=60000&limit=50&layers=${encodeURIComponent(SOURCE_LAYER)}` +
-      `&access_token=${encodeURIComponent(MAPBOX_TOKEN)}`;
-
-    const res = await fetch(url);
-    if (!res.ok) return [];
-    const json = await res.json();
-    return (json.features || []).map(f => f.properties || {});
+  // =========================
+  // BASIC GUARDS
+  // =========================
+  if (!MAPBOX_TOKEN || MAPBOX_TOKEN.trim() === "" || MAPBOX_TOKEN.includes("PASTE")) {
+    console.error("Mapbox token missing. Set window.MAPBOX_TOKEN in index.html or paste MAPBOX_TOKEN in app.js.");
+    return;
   }
 
-  const props = [];
-  for (const c of sampleCenters) props.push(...(await tilequery(c)));
-
-  const branches = new Set();
-  const groups = new Set();
-
-  for (const p of props) {
-    if (p.BranchName) branches.add(p.BranchName);
-    if (p.ProductGroupLevel1) groups.add(p.ProductGroupLevel1);
+  // Mapbox GL is expected to be loaded by index.html
+  if (!window.mapboxgl) {
+    console.error("mapboxgl not found. Make sure Mapbox GL JS is loaded before app.js.");
+    return;
   }
 
-  [...branches].sort().forEach(b => addOption(UI.branchSelect, b, b));
-  [...groups].sort().forEach(g => addOption(UI.groupSelect, g, g));
-}
+  mapboxgl.accessToken = MAPBOX_TOKEN;
 
-map.on("load", async () => {
-  map.addSource("zips-src", {
-    type: "vector",
-    url: `mapbox://${TILESET_ID}`
+  // =========================
+  // UI HOOKUP
+  // =========================
+  const UI = {
+    branchSelect: document.getElementById("branchSelect"),
+    groupSelect: document.getElementById("groupSelect"),
+    weightSelect: document.getElementById("weightSelect"),
+    startDate: document.getElementById("startDate"),
+    endDate: document.getElementById("endDate"),
+    clearDatesBtn: document.getElementById("clearDatesBtn"),
+    status: document.getElementById("status")
+  };
+
+  function setStatus(msg) {
+    if (UI.status) UI.status.textContent = msg;
+    console.log("[WLHeatmap]", msg);
+  }
+
+  function safeSetOptions(selectEl, values, allLabel) {
+    if (!selectEl) return;
+    const current = selectEl.value;
+
+    selectEl.innerHTML = "";
+    const optAll = document.createElement("option");
+    optAll.value = "__all__";
+    optAll.textContent = allLabel || "All";
+    selectEl.appendChild(optAll);
+
+    values.forEach(v => {
+      const opt = document.createElement("option");
+      opt.value = v;
+      opt.textContent = v;
+      selectEl.appendChild(opt);
+    });
+
+    // Preserve selection if still exists
+    const exists = Array.from(selectEl.options).some(o => o.value === current);
+    if (exists) selectEl.value = current;
+  }
+
+  // Converts YYYY-MM-DD => YYYYMMDD number
+  function isoToKey(iso) {
+    if (!iso) return null;
+    const parts = iso.split("-");
+    if (parts.length !== 3) return null;
+    const y = Number(parts[0]);
+    const m = Number(parts[1]);
+    const d = Number(parts[2]);
+    if (!y || !m || !d) return null;
+    return (y * 10000) + (m * 100) + d;
+  }
+
+  // =========================
+  // MAP INIT
+  // =========================
+  const map = new mapboxgl.Map({
+    container: "map",
+    style: "mapbox://styles/mapbox/light-v11",
+    center: DEFAULT_CENTER,
+    zoom: DEFAULT_ZOOM,
+    cooperativeGestures: true
   });
 
-  map.addLayer({
-    id: "zips-heat",
-    type: "heatmap",
-    source: "zips-src",
-    "source-layer": SOURCE_LAYER,
-    maxzoom: 12,
-    paint: {
-      "heatmap-radius": [
-        "interpolate", ["linear"], ["zoom"],
-        5, 10,
-        8, 25,
-        11, 45
-      ],
-      "heatmap-intensity": [
-        "interpolate", ["linear"], ["zoom"],
-        5, 0.8,
-        11, 1.4
-      ],
-      "heatmap-opacity": [
-        "interpolate", ["linear"], ["zoom"],
-        5, 0.85,
-        12, 0.15
-      ]
+  map.addControl(new mapboxgl.NavigationControl({ showCompass: false }), "top-right");
+
+  // =========================
+  // SOURCE + LAYERS
+  // =========================
+  function addSourceAndLayers() {
+    if (map.getSource(SOURCE_ID)) return;
+
+    map.addSource(SOURCE_ID, {
+      type: "vector",
+      url: `mapbox://${TILESET_ID}`
+    });
+
+    // Heatmap
+    map.addLayer({
+      id: HEAT_LAYER_ID,
+      type: "heatmap",
+      source: SOURCE_ID,
+      "source-layer": SOURCE_LAYER,
+      maxzoom: 22,
+      paint: {
+        // Base intensity scales with zoom a bit
+        "heatmap-intensity": [
+          "interpolate", ["linear"], ["zoom"],
+          5, 0.7,
+          12, 1.25,
+          18, 1.6
+        ],
+
+        // Weight is set dynamically by updateWeight() using setPaintProperty
+        "heatmap-weight": ["to-number", ["get", "TotalSales"]],
+
+        "heatmap-radius": [
+          "interpolate", ["linear"], ["zoom"],
+          5, 10,
+          9, 20,
+          12, 30,
+          16, 45
+        ],
+
+        "heatmap-opacity": 0.85
+      }
+    });
+
+    // Optional point layer at higher zoom
+    if (ENABLE_POINT_LAYER) {
+      map.addLayer({
+        id: POINT_LAYER_ID,
+        type: "circle",
+        source: SOURCE_ID,
+        "source-layer": SOURCE_LAYER,
+        minzoom: 9,
+        paint: {
+          "circle-radius": [
+            "interpolate", ["linear"], ["zoom"],
+            9, 2,
+            12, 4,
+            16, 7
+          ],
+          "circle-opacity": 0.6
+        }
+      });
+    }
+  }
+
+  // =========================
+  // FILTER + WEIGHT UPDATES
+  // =========================
+  function buildFilter() {
+    const branch = UI.branchSelect ? UI.branchSelect.value : "__all__";
+    const group = UI.groupSelect ? UI.groupSelect.value : "__all__";
+
+    const startKey = isoToKey(UI.startDate ? UI.startDate.value : "");
+    const endKey = isoToKey(UI.endDate ? UI.endDate.value : "");
+
+    const f = ["all"];
+
+    if (branch !== "__all__") {
+      f.push(["all", ["has", "BranchName"], ["==", ["get", "BranchName"], branch]]);
+    }
+
+    if (group !== "__all__") {
+      f.push(["all", ["has", "ProductGroupLevel1"], ["==", ["get", "ProductGroupLevel1"], group]]);
+    }
+
+    // Date range on numeric key
+    // IMPORTANT: this requires SaleDateKey in the tileset (YYYYMMDD)
+    if (startKey !== null) {
+      f.push([">=", ["to-number", ["get", "SaleDateKey"]], startKey]);
+    }
+    if (endKey !== null) {
+      f.push(["<=", ["to-number", ["get", "SaleDateKey"]], endKey]);
+    }
+
+    return f;
+  }
+
+  function applyFilter() {
+    const f = buildFilter();
+    if (map.getLayer(HEAT_LAYER_ID)) map.setFilter(HEAT_LAYER_ID, f);
+    if (ENABLE_POINT_LAYER && map.getLayer(POINT_LAYER_ID)) map.setFilter(POINT_LAYER_ID, f);
+  }
+
+  function updateWeight() {
+    const mode = UI.weightSelect ? UI.weightSelect.value : "sales";
+    const weightExpr =
+      mode === "tickets"
+        ? ["to-number", ["get", "TicketCount"]]
+        : ["to-number", ["get", "TotalSales"]];
+
+    if (map.getLayer(HEAT_LAYER_ID)) {
+      map.setPaintProperty(HEAT_LAYER_ID, "heatmap-weight", weightExpr);
+    }
+
+    // Optional: adjust intensity a bit for ticket mode
+    if (map.getLayer(HEAT_LAYER_ID)) {
+      const intensity =
+        mode === "tickets"
+          ? ["interpolate", ["linear"], ["zoom"], 5, 0.6, 12, 1.15, 18, 1.4]
+          : ["interpolate", ["linear"], ["zoom"], 5, 0.7, 12, 1.25, 18, 1.6];
+
+      map.setPaintProperty(HEAT_LAYER_ID, "heatmap-intensity", intensity);
+    }
+  }
+
+  function onAnyUiChange() {
+    applyFilter();
+  }
+
+  // =========================
+  // FILTER LIST POPULATION
+  // =========================
+  async function loadFiltersJson() {
+    try {
+      const res = await fetch(FILTERS_JSON_URL, { cache: "no-store" });
+      if (!res.ok) return null;
+      const json = await res.json();
+      return json;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  async function tileQueryDistinctValues() {
+    // Uses Mapbox Tilequery API to sample values.
+    // Note: Must be public tileset or token must have access.
+    const branches = new Set();
+    const groups = new Set();
+
+    async function queryOne(center, zoom) {
+      // radius in meters; increase slightly at low zoom
+      const radius = zoom <= 7 ? 12000 : zoom <= 9 ? 8000 : 5000;
+
+      const url =
+        `https://api.mapbox.com/v4/${TILESET_ID}/tilequery/${center[0]},${center[1]}.json` +
+        `?radius=${radius}` +
+        `&limit=${SAMPLE_LIMIT_PER_QUERY}` +
+        `&layers=${encodeURIComponent(SOURCE_LAYER)}` +
+        `&access_token=${encodeURIComponent(MAPBOX_TOKEN)}`;
+
+      const res = await fetch(url);
+      if (!res.ok) return;
+      const data = await res.json();
+      if (!data || !data.features) return;
+
+      for (const feat of data.features) {
+        const p = feat.properties || {};
+        if (p.BranchName) branches.add(String(p.BranchName));
+        if (p.ProductGroupLevel1) groups.add(String(p.ProductGroupLevel1));
+      }
+    }
+
+    // Run sequentially to avoid hammering
+    for (const z of SAMPLE_ZOOMS) {
+      for (const c of SAMPLE_CENTERS) {
+        await queryOne(c, z);
+      }
+    }
+
+    return {
+      branches: Array.from(branches).sort(),
+      productGroupsLevel1: Array.from(groups).sort()
+    };
+  }
+
+  async function initDropdownLists() {
+    setStatus("Loading filter lists...");
+
+    // 1) Try filters.json (complete list)
+    const filtersJson = await loadFiltersJson();
+    if (filtersJson && (filtersJson.branches || filtersJson.productGroupsLevel1)) {
+      safeSetOptions(UI.branchSelect, filtersJson.branches || [], "All branches");
+      safeSetOptions(UI.groupSelect, filtersJson.productGroupsLevel1 || [], "All product groups");
+      setStatus("Loaded filters from filters.json");
+      return;
+    }
+
+    // 2) Fallback to sampling
+    const sampled = await tileQueryDistinctValues();
+    safeSetOptions(UI.branchSelect, sampled.branches || [], "All branches");
+    safeSetOptions(UI.groupSelect, sampled.productGroupsLevel1 || [], "All product groups");
+    setStatus("Loaded filters from sampled tiles (fallback)");
+  }
+
+  // =========================
+  // DEBUG HELPERS (optional)
+  // =========================
+  function attachDebug() {
+    map.on("sourcedata", (e) => {
+      if (e.sourceId === SOURCE_ID && e.isSourceLoaded) {
+        console.log("[zips-src] source loaded, zoom:", map.getZoom().toFixed(2));
+      }
+    });
+
+    // Click to inspect feature props
+    map.on("click", (e) => {
+      const feats = map.queryRenderedFeatures(e.point, { layers: [HEAT_LAYER_ID].concat(ENABLE_POINT_LAYER ? [POINT_LAYER_ID] : []) });
+      if (!feats.length) return console.log("No feature at click");
+      console.log("Clicked feature properties:", feats[0].properties);
+    });
+  }
+
+  // =========================
+  // WIRE UI EVENTS
+  // =========================
+  function wireUiEvents() {
+    if (UI.branchSelect) UI.branchSelect.addEventListener("change", onAnyUiChange);
+    if (UI.groupSelect) UI.groupSelect.addEventListener("change", onAnyUiChange);
+
+    if (UI.weightSelect) {
+      UI.weightSelect.addEventListener("change", () => {
+        updateWeight();
+        onAnyUiChange();
+      });
+    }
+
+    if (UI.startDate) UI.startDate.addEventListener("change", onAnyUiChange);
+    if (UI.endDate) UI.endDate.addEventListener("change", onAnyUiChange);
+
+    if (UI.clearDatesBtn) {
+      UI.clearDatesBtn.addEventListener("click", () => {
+        if (UI.startDate) UI.startDate.value = "";
+        if (UI.endDate) UI.endDate.value = "";
+        onAnyUiChange();
+      });
+    }
+  }
+
+  // =========================
+  // BOOT
+  // =========================
+  map.on("load", async () => {
+    try {
+      addSourceAndLayers();
+      wireUiEvents();
+
+      // Default weight mode
+      updateWeight();
+
+      // Populate dropdown lists (filters.json preferred)
+      await initDropdownLists();
+
+      // Apply initial filter
+      applyFilter();
+
+      // Optional debug
+      // attachDebug();
+
+      setStatus("Ready");
+    } catch (err) {
+      console.error(err);
+      setStatus("Error initializing map. Check console.");
     }
   });
-
-  map.addLayer({
-    id: "zips-circles",
-    type: "circle",
-    source: "zips-src",
-    "source-layer": SOURCE_LAYER,
-    minzoom: 9,
-    paint: {
-      "circle-radius": 3,
-      "circle-opacity": 0.35
-    }
-  });
-
-  const loaded = await tryLoadFiltersJson();
-  if (!loaded) await sampleDistinctValues();
-
-  wireUI();
-  setActiveMetricButtons();
-
-  // Default date range (optional): set to YTD automatically
-  const now = new Date();
-  const yyyy = now.getFullYear();
-  UI.startDate.value = `${yyyy}-01-01`;
-  UI.endDate.value = now.toISOString().slice(0, 10);
-
-  applyFiltersAndMetric();
-});
+})();
