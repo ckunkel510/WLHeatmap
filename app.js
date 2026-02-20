@@ -525,8 +525,34 @@ try {
       // avoid duplicates if BisTrack re-inits
       if (document.getElementById("wlQuickDates")) return;
 
+      // Some BisTrack themes override button text colors (making labels appear blank).
+      // Inject a tiny style block to force readable button text.
+      if (!document.getElementById("wlQuickDatesStyle")) {
+        const st = document.createElement("style");
+        st.id = "wlQuickDatesStyle";
+        st.textContent = `
+          #wlQuickDates button{
+            color:#111827 !important;
+            font-size:12px !important;
+            line-height:1.2 !important;
+            font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif !important;
+            background:#ffffff !important;
+            border:1px solid rgba(0,0,0,.15) !important;
+            border-radius:8px !important;
+            padding:6px 10px !important;
+            cursor:pointer !important;
+            -webkit-text-fill-color:#111827 !important;
+          }
+          #wlQuickDates button:hover{
+            background:#f3f4f6 !important;
+          }
+        `;
+        document.head.appendChild(st);
+      }
+
       const bar = document.createElement("div");
       bar.id = "wlQuickDates";
+
       bar.style.display = "flex";
       bar.style.flexWrap = "wrap";
       bar.style.gap = "8px";
@@ -541,6 +567,11 @@ try {
         b.style.borderRadius = "8px";
         b.style.background = "#fff";
         b.style.cursor = "pointer";
+        b.style.color = "#111827";
+        b.style.fontSize = "12px";
+        b.style.lineHeight = "1.2";
+        b.style.fontFamily = "system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif";
+        b.style.webkitTextFillColor = "#111827";
         b.addEventListener("click", onClick);
         return b;
       };
