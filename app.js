@@ -1,67 +1,28 @@
-/* app.js — Woodson Zip Sales Heatmap (Mapbox GL JS v3)
-   - Filters: BranchName, ProductGroupLevel1, date range (from BOM SaleDate)
-   - Metric toggle: TotalSales vs TicketCount
-   - Heatmap appearance: unchanged
+/* app.leaflet.js — Woodson Zip Sales Heatmap (Leaflet + VectorGrid; no WebGL)
+   Goal: behave reliably inside BisTrack dashboards where WebGL / readPixels can break Mapbox GL JS interactivity.
 */
 
 (() => {
-  const LOG_PREFIX = "[WLHeatmap]";
+  const LOG_PREFIX = "[WLHeatmap-Leaflet]";
   const log = (...args) => console.log(LOG_PREFIX, ...args);
 
   // =========================
-  // EDIT THESE IF NEEDED
+  // Config
   // =========================
-  const TILESET_ID = "ckunkel.bp872kqi";
-  const SOURCE_LAYER = "MapBox-42vjbp";
+  const TOKEN = window.WL_MAPBOX_TOKEN || "";
+  const TILESET_ID = "ckunkel.bp872kqi";          // same tileset id
+  const SOURCE_LAYER = "MapBox-42vjbp";           // same source-layer name inside pbf
   const FILTERS_URL = "filters.json";
 
-  // BOM field name we saw in your tileset properties: "﻿SaleDate"
-  const BOM_SALEDATE_FIELD = "\ufeffSaleDate";
+  // Fields
+  const FIELD_BRANCH = "BranchName";
+  const FIELD_GROUP = "ProductGroupLevel1";
+  const FIELD_SALES = "TotalSales";
+  const FIELD_TICKETS = "TicketCount";
+  const FIELD_SALEDATE_KEY = "SaleDateKey";
+  const FIELD_SALEDATE_BOM = "\ufeffSaleDate"; // M/D/YYYY string in some exports
 
-  
   // =========================
-  // Dashboard-safe boot (BisTrack WebView / iframe)
-  // =========================
-  const onceKey = "__WLHeatmapBooted__";
-  if (window[onceKey]) { log("Already booted; skipping duplicate load."); return; }
-  window[onceKey] = true;
-
-  const ready = (fn) => {
-    if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", fn, { once: true });
-    else fn();
-  };
-
-  const waitForElement = (id, { timeoutMs = 15000 } = {}) =>
-    new Promise((resolve, reject) => {
-      const start = Date.now();
-      const check = () => {
-        const el = document.getElementById(id);
-        if (el) return resolve(el);
-        if (Date.now() - start > timeoutMs) return reject(new Error(`Timed out waiting for #${id}`));
-        requestAnimationFrame(check);
-      };
-      check();
-    });
-
-  const waitForNonZeroSize = (el, { timeoutMs = 15000 } = {}) =>
-    new Promise((resolve, reject) => {
-      const start = Date.now();
-      const check = () => {
-        const r = el.getBoundingClientRect();
-        if (r.width > 20 && r.height > 20) return resolve(r);
-        if (Date.now() - start > timeoutMs) return reject(new Error("Map container has zero size"));
-        requestAnimationFrame(check);
-      };
-      check();
-    });
-
-  const boot = async () => {
-    const mapEl = await waitForElement("map");
-    await waitForNonZeroSize(mapEl).catch(() => {
-      mapEl.style.minHeight = "600px";
-    });
-
-// =========================
   // DOM
   // =========================
   const els = {
@@ -76,167 +37,98 @@
     status: document.getElementById("status"),
   };
 
-  const setStatus = (msg) => {
-    if (els.status) els.status.textContent = msg || "";
-  };
+  const setStatus = (msg) => { if (els.status) els.status.textContent = msg || ""; };
 
   // =========================
   // State
   // =========================
   const state = {
-    metric: "sales", // "sales" | "tickets"
+    metric: "sales",     // sales | tickets
     branch: "__ALL__",
     group: "__ALL__",
-    startKey: null, // YYYYMMDD int
-    endKey: null,   // YYYYMMDD int
-  };
-
-  const METRICS = {
-    sales: { label: "Sales", prop: "TotalSales" },
-    tickets: { label: "Tickets", prop: "TicketCount" },
+    startKey: null,      // YYYYMMDD
+    endKey: null,
   };
 
   // =========================
   // Helpers
   // =========================
   function dateToKey(yyyy_mm_dd) {
-    // input from <input type="date"> is "YYYY-MM-DD"
     if (!yyyy_mm_dd) return null;
     const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(yyyy_mm_dd);
     if (!m) return null;
-    const y = Number(m[1]);
-    const mo = Number(m[2]);
-    const d = Number(m[3]);
+    return (Number(m[1]) * 10000) + (Number(m[2]) * 100) + Number(m[3]);
+  }
+
+  function parseMDYToKey(mdy) {
+    // "M/D/YYYY" or "MM/DD/YYYY"
+    if (!mdy || typeof mdy !== "string") return null;
+    const m = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(mdy.trim());
+    if (!m) return null;
+    const mo = Number(m[1]);
+    const d = Number(m[2]);
+    const y = Number(m[3]);
     return (y * 10000) + (mo * 100) + d;
   }
 
-
-// Convert YYYYMMDD int -> Date (local)
-function keyToDate(key) {
-  if (!key) return null;
-  const y = Math.floor(key / 10000);
-  const m = Math.floor((key % 10000) / 100);
-  const d = key % 100;
-  return new Date(y, m - 1, d);
-}
-
-// Format Date -> "M/D/YYYY" (no leading zeros), matching tileset "﻿SaleDate" values
-function formatMDY(dt) {
-  const m = dt.getMonth() + 1;
-  const d = dt.getDate();
-  const y = dt.getFullYear();
-  return `${m}/${d}/${y}`;
-}
-
-// Build an array of "M/D/YYYY" strings between startKey and endKey (inclusive)
-function buildAllowedSaleDates(startKey, endKey) {
-  const sdt = keyToDate(startKey);
-  const edt = keyToDate(endKey);
-  if (!sdt || !edt) return [];
-  // normalize to midnight
-  sdt.setHours(0,0,0,0);
-  edt.setHours(0,0,0,0);
-
-  const dayMs = 24 * 60 * 60 * 1000;
-  const days = Math.round((edt - sdt) / dayMs);
-  if (days < 0) return [];
-  // guard: avoid massive literal arrays in filters
-  if (days > 370) {
-    console.warn("[WLHeatmap] Date range too large for SaleDate string filter:", days, "days. Narrow the range or add SaleDateKey to the layer properties.");
-    return [];
+  function num(v) {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : 0;
   }
 
-  const out = [];
-  for (let i = 0; i <= days; i++) {
-    const dt = new Date(sdt.getTime() + i * dayMs);
-    out.push(formatMDY(dt));
-  }
-  return out;
-}
+  function passesDate(props) {
+    if (state.startKey == null && state.endKey == null) return true;
 
+    // Prefer numeric key if present.
+    const k = props?.[FIELD_SALEDATE_KEY] ?? props?.["\ufeffSaleDateKey"];
+    let key = Number.isFinite(Number(k)) ? Number(k) : null;
 
-  function safeToNumberExpr(propName) {
-  return ["coalesce", ["to-number", ["get", propName]], 0];
-}
-
-  // Build numeric YYYYMMDD from the tileset's M/D/YYYY string in "﻿SaleDate"
-  // Example: "2/11/2026" => 20260211
- // Build numeric YYYYMMDD from the tileset's M/D/YYYY string in "﻿SaleDate"
-// Example: "2/11/2026" => 20260211
-
-// =========================
-// Date filtering
-// =========================
-// IMPORTANT:
-// Mapbox GL JS v3 style validation is rejecting string-parsing expressions (split/at/etc.)
-// inside filters in your environment. The robust fix is to filter on a precomputed numeric
-// field in the tileset called `SaleDateKey` (YYYYMMDD as a NUMBER).
-//
-// Example property per feature:
-//   SaleDateKey: 20260219
-//
-// If SaleDateKey is missing, the date filter will be skipped (and we’ll surface a status note).
-function saleDateKeyExpr() {
-    return [
-      "coalesce",
-      ["to-number", ["get", "SaleDateKey"]],
-      ["to-number", ["get", "\ufeffSaleDateKey"]],
-      0,
-    ];
-  }
-
-function tilesetHasSaleDateKey() {
-    try {
-      // Prefer querySourceFeatures (sees properties even if not currently rendered)
-      const sfeats = map.querySourceFeatures(SOURCE_ID, { sourceLayer: SOURCE_LAYER });
-      const sp = sfeats?.[0]?.properties;
-      if (sp) return (sp.SaleDateKey != null || sp["\ufeffSaleDateKey"] != null);
-
-      // Fallback: rendered features
-      const feats = map.queryRenderedFeatures({ layers: [POINT_LAYER_ID] });
-      const p = feats?.[0]?.properties;
-      return !!(p && (p.SaleDateKey != null || p["\ufeffSaleDateKey"] != null));
-    } catch {
-      return false;
-    }
-}
-
-
-  function buildFilterExpr() {
-    const expr = ["all"];
-
-    if (state.branch && state.branch !== "__ALL__") {
-      expr.push(["==", ["get", "BranchName"], state.branch]);
+    if (key == null) {
+      const raw = props?.[FIELD_SALEDATE_BOM] ?? props?.["SaleDate"];
+      key = parseMDYToKey(raw);
     }
 
-    if (state.group && state.group !== "__ALL__") {
-      expr.push(["==", ["get", "ProductGroupLevel1"], state.group]);
-    }
+    if (key == null) return true; // if we can't read, don't block
 
-
-
-const dk = saleDateKeyExpr();
-
-// Date filter prefers numeric SaleDateKey when available.
-// If it isn't available via client-side feature properties, fall back to matching the raw "M/D/YYYY" SaleDate strings.
-const canDateFilter = tilesetHasSaleDateKey();
-
-if (canDateFilter) {
-  if (state.startKey != null) expr.push([">=", dk, state.startKey]);
-  if (state.endKey != null) expr.push(["<=", dk, state.endKey]);
-} else if (state.startKey != null || state.endKey != null) {
-  // Fallback: build list of allowed dates and filter on the BOM SaleDate field directly.
-  // Works without parsing inside Mapbox expressions (avoids GL JS v3 validation issues).
-  const sKey = state.startKey ?? state.endKey;
-  const eKey = state.endKey ?? state.startKey;
-  const allowed = buildAllowedSaleDates(sKey, eKey);
-
-  if (allowed.length) {
-    expr.push(["in", ["get", BOM_SALEDATE_FIELD], ["literal", allowed]]);
-  } else {
-    console.warn("[WLHeatmap] Date filter skipped — SaleDateKey not visible and allowed date list is empty/too large.");
+    if (state.startKey != null && key < state.startKey) return false;
+    if (state.endKey != null && key > state.endKey) return false;
+    return true;
   }
-}return expr;
+
+  function passesFilters(props) {
+    if (!props) return false;
+
+    if (state.branch !== "__ALL__" && props[FIELD_BRANCH] !== state.branch) return false;
+    if (state.group !== "__ALL__" && props[FIELD_GROUP] !== state.group) return false;
+    if (!passesDate(props)) return false;
+
+    return true;
+  }
+
+  function getMetricValue(props) {
+    if (!props) return 0;
+    return state.metric === "tickets" ? num(props[FIELD_TICKETS]) : num(props[FIELD_SALES]);
+  }
+
+  // Simple intensity -> circle size
+  function radiusFor(v) {
+    // Tune these to taste; keep lightweight for dashboards.
+    if (v <= 0) return 0;
+    if (v < 100) return 4;
+    if (v < 500) return 6;
+    if (v < 1500) return 8;
+    if (v < 5000) return 10;
+    return 12;
+  }
+
+  // Intensity -> fill opacity
+  function alphaFor(v) {
+    if (v <= 0) return 0;
+    if (v < 100) return 0.25;
+    if (v < 500) return 0.35;
+    if (v < 1500) return 0.45;
+    if (v < 5000) return 0.55;
+    return 0.65;
   }
 
   function setMetricUI(metric) {
@@ -244,55 +136,129 @@ if (canDateFilter) {
     const isSales = metric === "sales";
     els.metricSales?.classList.toggle("active", isSales);
     els.metricTickets?.classList.toggle("active", !isSales);
-    log("Metric set to", METRICS[metric].label);
+    log("Metric set to", metric);
   }
 
   // =========================
   // Map init
   // =========================
-  log("Booting...");
+  if (!TOKEN) {
+    setStatus("Missing Mapbox token.");
+    console.error(LOG_PREFIX, "Missing Mapbox token.");
+    return;
+  }
 
-  const map = new mapboxgl.Map({
-    container: mapEl,
-    style: "mapbox://styles/mapbox/light-v11",
-    center: [-96.7, 30.6],
-    zoom: 6.3,
+  setStatus("Loading map...");
+
+  const map = L.map("map", {
+    center: [30.6, -96.7],
+    zoom: 7,
+    preferCanvas: true,
+    zoomControl: true,
   });
 
-  map.addControl(new mapboxgl.NavigationControl({ visualizePitch: true }), "top-right");
+  // Basemap (OSM raster). No Mapbox GL / WebGL.
+  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 19,
+    attribution: "&copy; OpenStreetMap",
+  }).addTo(map);
 
-  // Debug helper
-  window.WLdbg = () => {
-    try {
-      const feats = map.queryRenderedFeatures({ layers: ["wl-points"] });
-      const p = feats?.[0]?.properties;
-      console.log("[WLHeatmap] sample feature properties:", p);
-      if (p) {
-        console.log("[WLHeatmap] keys:", Object.keys(p).sort());
-        console.log("[WLHeatmap] SaleDateKey:", p.SaleDateKey, "SaleDate:", p.SaleDate, "BOM SaleDate:", p["\ufeffSaleDate"]); 
-      }
-      return feats?.[0]?.properties;
-    } catch (e) {
-      console.warn("[WLHeatmap] WLdbg error:", e);
-      return null;
+  // Vector tile URL for Mapbox classic tiles endpoint
+  // (vector pbf, works with VectorGrid)
+  const vtUrl = `https://api.mapbox.com/v4/${TILESET_ID}/{z}/{x}/{y}.vector.pbf?access_token=${TOKEN}`;
+
+  // Create popup once
+  const popup = L.popup({ closeButton: true, autoPan: true });
+
+  let vg; // vector grid layer
+
+  function makeStyle(props) {
+    // If it doesn't pass filters, make it invisible and non-interactive.
+    if (!passesFilters(props)) {
+      return { fill: false, stroke: false, fillOpacity: 0, opacity: 0, radius: 0 };
     }
-  };
+
+    const v = getMetricValue(props);
+    const r = radiusFor(v);
+    const a = alphaFor(v);
+
+    // NOTE: Leaflet VectorGrid supports "radius" for point features.
+    // We keep a single neutral color and let radius/alpha do the work.
+    return {
+      weight: 0,
+      color: "#111827",
+      opacity: 0,
+      fillColor: "#111827",
+      fillOpacity: a,
+      radius: r,
+    };
+  }
+
+  function buildVectorGrid() {
+    if (vg) {
+      map.removeLayer(vg);
+      vg = null;
+    }
+
+    vg = L.vectorGrid.protobuf(vtUrl, {
+      vectorTileLayerStyles: {
+        [SOURCE_LAYER]: (props /*, z */) => makeStyle(props),
+      },
+      interactive: true,
+      getFeatureId: (f) => {
+        // Prefer Zip as stable id if present; else fallback.
+        const p = f?.properties || {};
+        return p.Zip || p.ZIP || p.PostalCode || p.postal || `${p[FIELD_BRANCH] || ""}-${p[FIELD_GROUP] || ""}-${p[FIELD_SALES] || ""}`;
+      },
+      maxNativeZoom: 14,
+    });
+
+    vg.on("click", (e) => {
+      const props = e?.layer?.properties;
+      if (!props || !passesFilters(props)) return;
+
+      const zip = props.Zip || props.ZIP || props.PostalCode || props.postal || "(zip unknown)";
+      const branch = props[FIELD_BRANCH] || "";
+      const group = props[FIELD_GROUP] || "";
+      const sales = num(props[FIELD_SALES]).toLocaleString();
+      const tickets = num(props[FIELD_TICKETS]).toLocaleString();
+
+      const html = `
+        <div class="wl-pop">
+          <h3>Zip ${zip}</h3>
+          <div><span class="k">Branch:</span> <span class="v">${branch}</span></div>
+          <div><span class="k">Group:</span> <span class="v">${group}</span></div>
+          <div style="margin-top:6px;"><span class="k">Sales:</span> <span class="v">$${sales}</span></div>
+          <div><span class="k">Tickets:</span> <span class="v">${tickets}</span></div>
+        </div>
+      `;
+
+      popup.setLatLng(e.latlng).setContent(html).openOn(map);
+    });
+
+    vg.addTo(map);
+  }
+
+  function redraw() {
+    if (!vg) return;
+    // VectorGrid doesn't have a public setFilter; we redraw by triggering style function.
+    vg.redraw();
+  }
 
   // =========================
-  // Load filters
+  // Filters list loader
   // =========================
-  async function loadFilters() {
-    log("Loading filter lists...");
-    setStatus("Loading filters…");
-
+  async function loadFilterLists() {
     try {
+      log("Loading filter lists...");
       const res = await fetch(FILTERS_URL, { cache: "no-store" });
-      if (!res.ok) throw new Error(`filters.json HTTP ${res.status}`);
+      if (!res.ok) throw new Error(`Failed to load ${FILTERS_URL} (${res.status})`);
       const data = await res.json();
 
-      const branches = Array.isArray(data.branches) ? data.branches : [];
-      const groups = Array.isArray(data.groups) ? data.groups : [];
+      const branches = (data.branches || []).slice().sort();
+      const groups = (data.groups || []).slice().sort();
 
+      // populate selects
       if (els.branchSelect) {
         for (const b of branches) {
           const opt = document.createElement("option");
@@ -312,395 +278,70 @@ if (canDateFilter) {
       }
 
       log(`Loaded filters.json • ${branches.length} branches • ${groups.length} groups`);
-      setStatus(`Loaded ${branches.length} branches • ${groups.length} product groups`);
+      setStatus("Ready");
     } catch (err) {
-      console.warn(LOG_PREFIX, "filters.json load failed:", err);
-      setStatus("Could not load filters.json (check path).");
+      console.error(LOG_PREFIX, err);
+      setStatus("Loaded map (filters list failed)." );
     }
   }
 
   // =========================
-  // Layers (appearance unchanged)
+  // Apply/Clear
   // =========================
-  const SOURCE_ID = "wl-zip-sales";
-  const HEAT_LAYER_ID = "wl-heat";
-  const POINT_LAYER_ID = "wl-points";
-
-  function ensureLayers() {
-    if (!map.getSource(SOURCE_ID)) {
-      map.addSource(SOURCE_ID, {
-        type: "vector",
-        url: `mapbox://${TILESET_ID}`,
-      });
-    }
-
-    const metricProp = METRICS[state.metric].prop;
-    const metricNum = safeToNumberExpr(metricProp);
-
-    if (!map.getLayer(HEAT_LAYER_ID)) {
-      map.addLayer({
-        id: HEAT_LAYER_ID,
-        type: "heatmap",
-        source: SOURCE_ID,
-        "source-layer": SOURCE_LAYER,
-        paint: {
-          "heatmap-weight": [
-            "interpolate", ["linear"], metricNum,
-            0, 0,
-            500, 0.25,
-            2000, 0.6,
-            10000, 1
-          ],
-          "heatmap-intensity": [
-            "interpolate", ["linear"], ["zoom"],
-            0, 0.7,
-            7, 1.0,
-            10, 1.4,
-            12, 1.8
-          ],
-          "heatmap-radius": [
-            "interpolate", ["linear"], ["zoom"],
-            0, 10,
-            7, 22,
-            10, 34,
-            12, 48
-          ],
-          "heatmap-opacity": [
-            "interpolate", ["linear"], ["zoom"],
-            6, 0.92,
-            11, 0.78,
-            13, 0.6
-          ],
-        },
-      });
-    }
-
-    if (!map.getLayer(POINT_LAYER_ID)) {
-      map.addLayer({
-        id: POINT_LAYER_ID,
-        type: "circle",
-        source: SOURCE_ID,
-        "source-layer": SOURCE_LAYER,
-        paint: {
-          "circle-opacity": [
-            "interpolate", ["linear"], ["zoom"],
-            6, 0.08,
-            9, 0.18,
-            12, 0.35
-          ],
-          "circle-radius": [
-            "interpolate", ["linear"], ["zoom"],
-            6, 2,
-            9, 3,
-            12, 5
-          ],
-          "circle-color": "#111827",
-        },
-      });
-    }
-  }
-
-  function updateMetricPaint() {
-    const metricProp = METRICS[state.metric].prop;
-    const metricNum = safeToNumberExpr(metricProp);
-
-    if (map.getLayer(HEAT_LAYER_ID)) {
-      map.setPaintProperty(HEAT_LAYER_ID, "heatmap-weight", [
-        "interpolate", ["linear"], metricNum,
-        0, 0,
-        500, 0.25,
-        2000, 0.6,
-        10000, 1
-      ]);
-    }
-  }
-
-  // =========================
-  // Apply / Clear
-  // =========================
-  function applyFilters() {
-    state.branch = els.branchSelect?.value ?? "__ALL__";
-    state.group = els.groupSelect?.value ?? "__ALL__";
-
+  function applyFromUI() {
+    state.branch = els.branchSelect?.value || "__ALL__";
+    state.group = els.groupSelect?.value || "__ALL__";
     state.startKey = dateToKey(els.startDate?.value);
     state.endKey = dateToKey(els.endDate?.value);
 
+    // Normalize range if swapped
     if (state.startKey != null && state.endKey != null && state.startKey > state.endKey) {
       const tmp = state.startKey;
       state.startKey = state.endKey;
       state.endKey = tmp;
-
-      const s = els.startDate.value;
-      els.startDate.value = els.endDate.value;
-      els.endDate.value = s;
     }
 
-    const filterExpr = buildFilterExpr();
-     // ---- DEBUG ----
-console.log("[WLHeatmap][DEBUG] state:", JSON.stringify(state));
-console.log("[WLHeatmap][DEBUG] filterExpr:", JSON.stringify(filterExpr));
-// --------------
-
-    try {
-  if (map.getLayer(HEAT_LAYER_ID)) map.setFilter(HEAT_LAYER_ID, filterExpr);
-} catch (e) {
-  console.error("[WLHeatmap][DEBUG] setFilter wl-heat failed", e, filterExpr);
-}
-
-try {
-  if (map.getLayer(POINT_LAYER_ID)) map.setFilter(POINT_LAYER_ID, filterExpr);
-} catch (e) {
-  console.error("[WLHeatmap][DEBUG] setFilter wl-points failed", e, filterExpr);
-}
-
-  // Date filter note (tileset must include numeric `SaleDateKey` to enable date filtering)
-  const canDateFilterNow = (state.startKey != null || state.endKey != null) ? tilesetHasSaleDateKey() : true;
-  const dateNote = (canDateFilterNow ? "" : " (SaleDateKey not visible — using SaleDate string filter)");
-
-
-    setStatus(
-      `Metric: ${METRICS[state.metric].label} • ` +
-      `Branch: ${state.branch === "__ALL__" ? "All" : state.branch} • ` +
-      `Group: ${state.group === "__ALL__" ? "All" : state.group} • ` +
-      `Dates: ${state.startKey ?? "…"} → ${state.endKey ?? "…"}${dateNote}`
-    );
-
-    log("Applied filters • Metric:", METRICS[state.metric].label);
+    log("Applied", JSON.stringify(state));
+    redraw();
   }
 
-  function clearFilters() {
+  function clearUI() {
     if (els.branchSelect) els.branchSelect.value = "__ALL__";
     if (els.groupSelect) els.groupSelect.value = "__ALL__";
     if (els.startDate) els.startDate.value = "";
     if (els.endDate) els.endDate.value = "";
+    setMetricUI("sales");
 
     state.branch = "__ALL__";
     state.group = "__ALL__";
     state.startKey = null;
     state.endKey = null;
 
-    applyFilters();
-    log("Cleared filters");
-  }
-
-  function wireUI() {
-    els.metricSales?.addEventListener("click", () => {
-      setMetricUI("sales");
-      updateMetricPaint();
-      applyFilters();
-    });
-
-    els.metricTickets?.addEventListener("click", () => {
-      setMetricUI("tickets");
-      updateMetricPaint();
-      applyFilters();
-    });
-
-    els.applyBtn?.addEventListener("click", () => applyFilters());
-    els.clearBtn?.addEventListener("click", () => clearFilters());
-
-    els.startDate?.addEventListener("keydown", (e) => { if (e.key === "Enter") applyFilters(); });
-    els.endDate?.addEventListener("keydown", (e) => { if (e.key === "Enter") applyFilters(); });
+    redraw();
   }
 
   // =========================
-  // Startup
+  // Wire events
   // =========================
-  (async function init() {
-    await loadFilters();
-    wireUI();
+  els.metricSales?.addEventListener("click", () => { setMetricUI("sales"); redraw(); });
+  els.metricTickets?.addEventListener("click", () => { setMetricUI("tickets"); redraw(); });
 
-    
-// =========================
-// Hover tooltip on points
-// =========================
-function wirePointHoverTooltip() {
-  if (!map) return;
+  els.applyBtn?.addEventListener("click", applyFromUI);
+  els.clearBtn?.addEventListener("click", clearUI);
 
-  // Avoid double-binding if load re-runs in dev/hot reload scenarios
-  if (wirePointHoverTooltip._bound) return;
-  wirePointHoverTooltip._bound = true;
+  // Auto-apply in dashboards (clicks sometimes get eaten).
+  els.branchSelect?.addEventListener("change", applyFromUI);
+  els.groupSelect?.addEventListener("change", applyFromUI);
+  els.startDate?.addEventListener("change", applyFromUI);
+  els.endDate?.addEventListener("change", applyFromUI);
 
-  const hoverPopup = new mapboxgl.Popup({
-    closeButton: true,
-    closeOnClick: true,
-    maxWidth: "320px",
-  });
+  // Build map + layer
+  buildVectorGrid();
+  loadFilterLists();
+  setStatus("Ready");
 
-  const fmtMoney = (v) => {
-    const n = Number(v);
-    if (!isFinite(n)) return "$0.00";
-    return n.toLocaleString(undefined, { style: "currency", currency: "USD" });
-  };
-
-  const fmtNum = (v) => {
-    const n = Number(v);
-    if (!isFinite(n)) return "0";
-    return n.toLocaleString();
-  };
-
-  const getProp = (p, key) => (p && p[key] != null ? p[key] : undefined);
-
-  const bindHandlers = () => {
-    if (!map.getLayer(POINT_LAYER_ID)) return false;
-
-    map.on("mouseenter", POINT_LAYER_ID, () => {
-      map.getCanvas().style.cursor = "pointer";
-    });
-
-    map.on("mouseleave", POINT_LAYER_ID, () => {
-      map.getCanvas().style.cursor = "";
-      hoverPopup.remove();
-    });
-
-    // Click-to-show tooltip (more reliable + lighter than hover in BisTrack embedded dashboards)
-map.on("click", POINT_LAYER_ID, (e) => {
-  const f = e.features && e.features[0];
-  if (!f) return;
-
-  const p0 = f.properties || {};
-  const zip = getProp(p0, "Zip5") ?? "—";
-  const branch = getProp(p0, "BranchName") ?? "—";
-
-  // Aggregate across currently rendered + filtered features in the viewport (fast enough on click)
-  const feats = map.queryRenderedFeatures({ layers: [POINT_LAYER_ID] }) || [];
-
-  let ticketsSum = 0;
-  let salesSum = 0;
-  let profitSum = 0;
-  const byGroup = new Map();
-  let minDate = null;
-  let maxDate = null;
-
-  for (const ft of feats) {
-    const p = ft.properties || {};
-    const z = getProp(p, "Zip5");
-    const b = getProp(p, "BranchName");
-    if (String(z) !== String(zip)) continue;
-    if (String(b) !== String(branch)) continue;
-
-    const t = Number(getProp(p, "TicketCount")) || 0;
-    const s = Number(getProp(p, "TotalSales")) || 0;
-    const pr = Number(getProp(p, "TotalProfit")) || 0;
-
-    ticketsSum += t;
-    salesSum += s;
-    profitSum += pr;
-
-    if (state.group === "__ALL__") {
-      const g = String(getProp(p, "ProductGroupLevel1") ?? "—");
-      const cur = byGroup.get(g) || { tickets: 0, sales: 0, profit: 0 };
-      cur.tickets += t;
-      cur.sales += s;
-      cur.profit += pr;
-      byGroup.set(g, cur);
-    }
-
-    const sd =
-      getProp(p, BOM_SALEDATE_FIELD) ??
-      getProp(p, "SaleDate") ??
-      getProp(p, "\ufeffSaleDateISO") ??
-      getProp(p, "SaleDateISO") ??
-      null;
-
-    if (sd) {
-      const dt = new Date(String(sd));
-      if (!isNaN(dt.getTime())) {
-        if (!minDate || dt < minDate) minDate = dt;
-        if (!maxDate || dt > maxDate) maxDate = dt;
-      }
-    }
-  }
-
-  const dateLine = (() => {
-    if (minDate && maxDate) {
-      const a = formatMDY(minDate);
-      const b = formatMDY(maxDate);
-      return (a === b) ? a : `${a} → ${b}`;
-    }
-    const clickedDate =
-      getProp(p0, BOM_SALEDATE_FIELD) ??
-      getProp(p0, "SaleDate") ??
-      getProp(p0, "\ufeffSaleDateISO") ??
-      getProp(p0, "SaleDateISO") ??
-      "—";
-    return clickedDate;
-  })();
-
-  // Breakdown (top 6 groups by sales)
-  let breakdownHtml = "";
-  if (state.group === "__ALL__" && byGroup.size) {
-    const rows = Array.from(byGroup.entries())
-      .map(([g, v]) => ({ g, ...v }))
-      .sort((a, b) => b.sales - a.sales)
-      .slice(0, 6);
-
-    breakdownHtml =
-      `<div style="margin-top:10px; font-size:12px;">` +
-      `<div style="font-weight:700; margin-bottom:6px;">Top groups (viewport)</div>` +
-      rows.map(r =>
-        `<div style="display:flex; justify-content:space-between; gap:10px;">` +
-          `<span style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:180px;">${r.g}</span>` +
-          `<span>${fmtMoney(r.sales)}</span>` +
-        `</div>`
-      ).join("") +
-      `</div>`;
-  }
-
-  const html = `
-    <div style="font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;">
-      <div style="font-weight:700; font-size:13px; margin-bottom:6px;">${zip} • ${branch}</div>
-      <div style="font-size:12px; opacity:.9; margin-bottom:8px;">${dateLine}</div>
-      <div style="font-size:12px; margin-bottom:8px;">
-        <b>Scope:</b> ${state.group === "__ALL__" ? "All groups" : state.group} • ${state.branch === "__ALL__" ? "All branches" : state.branch}
-      </div>
-      <div style="display:grid; grid-template-columns: 1fr 1fr; gap:8px; font-size:12px;">
-        <div><b>Tickets</b><br>${fmtNum(ticketsSum)}</div>
-        <div><b>Sales</b><br>${fmtMoney(salesSum)}</div>
-        <div><b>Profit</b><br>${fmtMoney(profitSum)}</div>
-      </div>
-      ${breakdownHtml}
-      <div style="margin-top:8px; font-size:11px; opacity:.7;">
-        Note: totals are for currently rendered points in the viewport (and respect your filters).
-      </div>
-    </div>
-  `;
-
-  hoverPopup.setLngLat(e.lngLat).setHTML(html).addTo(map);
-});
-
-    return true;
-  };
-
-  // Bind now if layer exists, otherwise wait until after layers are added
-  if (!bindHandlers()) {
-    map.once("idle", () => {
-      bindHandlers();
-    });
-  }
-}
-
-map.on("load", () => {
-      log("Map loaded. Adding layers...");
-      ensureLayers();
-      wirePointHoverTooltip();
-
-      setMetricUI("sales");
-      updateMetricPaint();
-      applyFilters();
-
-      log("Ready");
-    });
-  })();
-
-  };
-
-  ready(() => {
-    boot().catch((err) => {
-      console.error(LOG_PREFIX, "Failed to boot:", err);
-      const status = document.getElementById("status");
-      if (status) status.textContent = `Failed to initialize: ${err.message || err}`;
-    });
-  });
+  // In embedded dashboards, force a resize/recalc once (prevents "dead" canvas).
+  setTimeout(() => map.invalidateSize(true), 250);
+  setTimeout(() => map.invalidateSize(true), 1200);
 
 })();
