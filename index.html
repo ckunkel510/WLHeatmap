@@ -3,14 +3,14 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Woodson Zip Sales Heatmap</title>
+  <title>Woodson Zip Sales Heatmap (Leaflet Fallback)</title>
 
-  <!-- Mapbox GL JS -->
-  <link href="https://api.mapbox.com/mapbox-gl-js/v3.6.0/mapbox-gl.css" rel="stylesheet" />
-  <script src="https://api.mapbox.com/mapbox-gl-js/v3.6.0/mapbox-gl.js"></script>
+  <!-- Leaflet (no WebGL required) -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 
-  <!-- Optional: your favicon (adjust path if you have one) -->
-  <link rel="icon" href="favicon.ico" />
+  <!-- Vector tiles on Leaflet Canvas (still no WebGL) -->
+  <script src="https://unpkg.com/leaflet.vectorgrid@1.3.0/dist/Leaflet.VectorGrid.bundled.js"></script>
 
   <style>
     html, body { height: 100%; margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
@@ -25,7 +25,7 @@
       overflow: auto;
     }
     #map { flex: 1; min-width: 0; min-height: 600px; }
-    #map, .mapboxgl-map, canvas.mapboxgl-canvas { pointer-events: auto !important; }
+
     .row { margin-bottom: 10px; }
     label { display: block; font-size: 12px; margin-bottom: 4px; color: #374151; }
     select, input, button {
@@ -52,6 +52,12 @@
       color: #fff;
       border-color: #111827;
     }
+
+    /* Tooltip/popup polish */
+    .leaflet-popup-content { margin: 10px 12px; }
+    .wl-pop h3 { margin: 0 0 6px 0; font-size: 14px; }
+    .wl-pop .k { color: #6b7280; font-size: 12px; }
+    .wl-pop .v { font-weight: 600; }
   </style>
 </head>
 
@@ -61,6 +67,7 @@
       <h2 style="margin: 0 0 10px 0;">Zip Sales Heatmap</h2>
       <div class="small" style="margin-bottom: 12px;">
         Filter by Branch, Product Group, and Date Range. Toggle metric between Sales and Tickets.
+        <div style="margin-top:6px;">(This version uses Leaflet canvas instead of WebGL for BisTrack dashboards.)</div>
       </div>
 
       <div class="row">
@@ -107,12 +114,11 @@
     <div id="map"></div>
   </div>
 
-  <!-- ✅ Put your Mapbox token here (public token starts with pk.) -->
   <script>
-    mapboxgl.accessToken = "pk.eyJ1IjoiY2t1bmtlbCIsImEiOiJjbWx1Yjc4ODIwOW51M2Zwdm15dHFodnh1In0.F2yytru7jt9khYyPziZrHw";
+    // Keep token in one place.
+    window.WL_MAPBOX_TOKEN = "pk.eyJ1IjoiY2t1bmtlbCIsImEiOiJjbWx1Yjc4ODIwOW51M2Zwdm15dHFodnh1In0.F2yytru7jt9khYyPziZrHw";
   </script>
 
-  <!-- Your app logic -->
-  <script src="app.js"></script>
+  <script src="app.leaflet.js"></script>
 </body>
 </html>
