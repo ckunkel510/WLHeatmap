@@ -76,6 +76,283 @@
     status: document.getElementById("status"),
   };
 
+
+  // =========================
+  // Mobile / Tablet: collapsible filter drawer (no HTML edits required)
+  // - Hides the sidebar filter section on small screens
+  // - Shows a compact "Filters" bar; tap to open drawer
+  // - On Apply: auto-hides the drawer again
+  // =========================
+  const MOBILE_BREAKPOINT_PX = 820; // tablet/mobile cutoff
+
+  function isMobileViewport() {
+    return !!(window.matchMedia && window.matchMedia(`(max-width: ${MOBILE_BREAKPOINT_PX}px)`).matches);
+  }
+
+  // Locate the filter panel by walking up from Apply and finding the smallest ancestor
+  // that contains the core filter controls.
+  function findFilterPanel() {
+    const apply = els.applyBtn;
+    if (!apply) return null;
+
+    const mapEl = document.getElementById("map");
+    const required = [els.branchSelect, els.groupSelect, els.startDate, els.endDate, els.applyBtn].filter(Boolean);
+
+    const containsAll = (node) => required.every((c) => node && node.contains && node.contains(c));
+    const containsMap = (node) => !!(mapEl && node && node.contains && node.contains(mapEl));
+
+    // Walk up from Apply; prefer the smallest ancestor that has all controls but NOT the map.
+    let cur = apply.parentElement;
+    let best = null;
+    while (cur && cur !== document.body && cur !== document.documentElement) {
+      if (containsAll(cur) && !containsMap(cur)) best = cur;
+      cur = cur.parentElement;
+    }
+
+    // Fallback: nearest "panel-ish" ancestor that doesn't include the map
+    const fallback = apply.closest("section, aside, .sidebar, .filters, .filter-panel, .panel");
+    if (fallback && !containsMap(fallback)) return fallback;
+
+    return best || apply.parentElement;
+  }
+
+  // Create a compact status + toggle button for mobile/tablet
+  function ensureMobileFilterToggleUI(filterPanelEl) {
+    if (!filterPanelEl) return;
+
+    // Prevent duplicates (BisTrack can re-init)
+    if (document.getElementById("wlFilterToggleBar")) return;
+
+    // Inject CSS once
+    if (!document.getElementById("wlMobileFilterStyle")) {
+      const st = document.createElement("style");
+      st.id = "wlMobileFilterStyle";
+      st.textContent = `
+        /* Mobile filter toggle + drawer */
+        #wlFilterToggleBar{
+          position: absolute;
+          top: 10px;
+          left: 10px;
+          right: 10px;
+          z-index: 5;
+          display: none;
+        }
+        #wlFilterToggleBar .wl-bar{
+          display:flex;
+          align-items:center;
+          justify-content:space-between;
+          gap:10px;
+          padding:10px 12px;
+          border:1px solid rgba(0,0,0,.15);
+          border-radius:12px;
+          background: rgba(255,255,255,.95);
+          box-shadow: 0 6px 18px rgba(0,0,0,.08);
+          font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+          -webkit-text-size-adjust: 100%;
+        }
+        #wlFilterToggleBar .wl-title{
+          font-weight: 700;
+          font-size: 13px;
+          color:#111827;
+          line-height:1.15;
+        }
+        #wlFilterToggleBar .wl-summary{
+          font-size: 11px;
+          color:#111827;
+          opacity:.9;
+          line-height:1.2;
+          max-width: 70%;
+          overflow:hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        #wlFilterToggleBar button{
+          color:#111827 !important;
+          background:#ffffff !important;
+          border:1px solid rgba(0,0,0,.18) !important;
+          border-radius:10px !important;
+          padding:8px 10px !important;
+          font-size:12px !important;
+          cursor:pointer !important;
+          -webkit-text-fill-color:#111827 !important;
+          white-space:nowrap !important;
+        }
+        #wlFilterToggleBar button:active{ transform: translateY(1px); }
+
+        /* Drawer states (mobile only) */
+        @media (max-width: ${MOBILE_BREAKPOINT_PX}px){
+          .wl-filter-drawer{
+            position: fixed !important;
+            top: 0 !important;
+            left: 0 !important;
+            height: 100vh !important;
+            width: min(420px, 92vw) !important;
+            max-width: 92vw !important;
+            z-index: 9999 !important;
+            background: #ffffff !important;
+            box-shadow: 16px 0 40px rgba(0,0,0,.25) !important;
+            overflow: auto !important;
+            transform: translateX(-110%);
+            transition: transform .18s ease;
+            padding: 14px 14px 22px 14px !important;
+          }
+          .wl-filter-drawer.is-open{ transform: translateX(0); }
+
+          .wl-filter-backdrop{
+            position: fixed;
+            inset: 0;
+            z-index: 9998;
+            background: rgba(0,0,0,.35);
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity .18s ease;
+          }
+          .wl-filter-backdrop.is-open{
+            opacity: 1;
+            pointer-events: auto;
+          }
+
+          .wl-filter-drawer .wl-drawer-header{
+            display:flex;
+            align-items:center;
+            justify-content:space-between;
+            gap:10px;
+            margin-bottom: 10px;
+          }
+          .wl-filter-drawer .wl-drawer-header .wl-h{
+            font-weight: 800;
+            font-size: 14px;
+            color:#111827;
+            font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+          }
+          .wl-filter-drawer .wl-close{
+            border:1px solid rgba(0,0,0,.18);
+            border-radius: 10px;
+            padding: 7px 10px;
+            background:#fff;
+            cursor:pointer;
+            color:#111827;
+            font-size: 12px;
+            -webkit-text-fill-color:#111827;
+          }
+        }
+
+        /* Only activate on small screens */
+        @media (max-width: ${MOBILE_BREAKPOINT_PX}px){
+          #wlFilterToggleBar{ display:block; }
+        }
+      `;
+      document.head.appendChild(st);
+    }
+
+    // Backdrop
+    const backdrop = document.createElement("div");
+    backdrop.id = "wlFilterBackdrop";
+    backdrop.className = "wl-filter-backdrop";
+    document.body.appendChild(backdrop);
+
+    // Toggle bar (overlay on top of map; doesn't require HTML changes)
+    const barWrap = document.createElement("div");
+    barWrap.id = "wlFilterToggleBar";
+    barWrap.innerHTML = `
+      <div class="wl-bar">
+        <div style="min-width:0;">
+          <div class="wl-title">Filters</div>
+          <div class="wl-summary" id="wlFilterSummary">Tap to adjust…</div>
+        </div>
+        <button type="button" id="wlToggleFiltersBtn">Show</button>
+      </div>
+    `;
+
+    // Place it near the map so it feels "attached" (fallback to body)
+    const mapParent = (document.getElementById("map")?.parentElement) || document.body;
+    if (mapParent !== document.body) {
+      const pos = getComputedStyle(mapParent).position;
+      if (pos === "static") mapParent.style.position = "relative";
+    }
+    mapParent.appendChild(barWrap);
+
+    // Convert filter panel into a drawer on mobile
+    filterPanelEl.classList.add("wl-filter-drawer");
+
+    // Add a header row inside the drawer (only once)
+    if (!filterPanelEl.querySelector(".wl-drawer-header")) {
+      const header = document.createElement("div");
+      header.className = "wl-drawer-header";
+      header.innerHTML = `
+        <div class="wl-h">Filters</div>
+        <button type="button" class="wl-close" id="wlCloseFiltersBtn">Close</button>
+      `;
+      filterPanelEl.insertBefore(header, filterPanelEl.firstChild);
+    }
+
+    const toggleBtn = barWrap.querySelector("#wlToggleFiltersBtn");
+    const closeBtn = filterPanelEl.querySelector("#wlCloseFiltersBtn");
+    const summaryEl = barWrap.querySelector("#wlFilterSummary");
+
+    function setOpen(open) {
+      if (!isMobileViewport()) {
+        filterPanelEl.classList.remove("is-open");
+        backdrop.classList.remove("is-open");
+        if (toggleBtn) toggleBtn.textContent = "Show";
+        return;
+      }
+      filterPanelEl.classList.toggle("is-open", !!open);
+      backdrop.classList.toggle("is-open", !!open);
+      if (toggleBtn) toggleBtn.textContent = open ? "Hide" : "Show";
+    }
+
+    function updateSummary() {
+      if (!summaryEl) return;
+      const b = els.branchSelect?.value || "__ALL__";
+      const g = els.groupSelect?.value || "__ALL__";
+      const s = els.startDate?.value || "";
+      const e = els.endDate?.value || "";
+      const bTxt = (b === "__ALL__") ? "All branches" : b;
+      const gTxt = (g === "__ALL__") ? "All groups" : g;
+      const dTxt = (s || e) ? `${s || "…"} → ${e || "…"}` : "Any dates";
+      summaryEl.textContent = `${bTxt} • ${gTxt} • ${dTxt}`;
+    }
+
+    toggleBtn?.addEventListener("click", () => {
+      const openNow = !filterPanelEl.classList.contains("is-open");
+      setOpen(openNow);
+      updateSummary();
+    });
+
+    closeBtn?.addEventListener("click", () => setOpen(false));
+    backdrop.addEventListener("click", () => setOpen(false));
+
+    ["change", "input"].forEach((evt) => {
+      els.branchSelect?.addEventListener(evt, updateSummary);
+      els.groupSelect?.addEventListener(evt, updateSummary);
+      els.startDate?.addEventListener(evt, updateSummary);
+      els.endDate?.addEventListener(evt, updateSummary);
+    });
+
+    const onResize = () => {
+      updateSummary();
+      if (!isMobileViewport()) {
+        backdrop.classList.remove("is-open");
+        filterPanelEl.classList.remove("is-open");
+        if (toggleBtn) toggleBtn.textContent = "Show";
+      } else {
+        setOpen(false);
+      }
+    };
+    window.addEventListener("resize", onResize);
+    window.addEventListener("orientationchange", onResize);
+
+    window.__WLFilterDrawer__ = { setOpen, updateSummary, isMobileViewport };
+    updateSummary();
+    setOpen(false);
+  }
+
+  // Kickoff once DOM is available (we're inside boot(), so elements exist)
+  const __wlFilterPanelEl = findFilterPanel();
+  ensureMobileFilterToggleUI(__wlFilterPanelEl);
+
+
   const setStatus = (msg) => {
     if (els.status) els.status.textContent = msg || "";
   };
@@ -494,6 +771,8 @@ try {
       `Dates: ${state.startKey ?? "…"} → ${state.endKey ?? "…"}${dateNote}`
     );
 
+    try { window.__WLFilterDrawer__?.updateSummary?.(); } catch {}
+
     log("Applied filters • Metric:", METRICS[state.metric].label);
   }
 
@@ -525,8 +804,8 @@ try {
       applyFilters();
     });
 
-    els.applyBtn?.addEventListener("click", () => applyFilters());
-    els.clearBtn?.addEventListener("click", () => clearFilters());
+    els.applyBtn?.addEventListener("click", () => { applyFilters(); try { window.__WLFilterDrawer__?.setOpen(false); } catch {} });
+    els.clearBtn?.addEventListener("click", () => { clearFilters(); try { window.__WLFilterDrawer__?.setOpen(false); } catch {} });
 
     els.startDate?.addEventListener("keydown", (e) => { if (e.key === "Enter") applyFilters(); });
     els.endDate?.addEventListener("keydown", (e) => { if (e.key === "Enter") applyFilters(); });
